@@ -60,7 +60,20 @@ export async function complete(
   options?: CompleteOptions,
   runId?: string,
 ): Promise<ModelCallResult> {
-  const model = modelFor(task);
+  return completeWith(modelFor(task), messages, options, runId, task);
+}
+
+/**
+ * Same as complete() but with an explicit model name (used by the validator,
+ * which must run on a different model from the patch model).
+ */
+export async function completeWith(
+  model: string,
+  messages: ChatMessage[],
+  options?: CompleteOptions,
+  runId?: string,
+  task: ModelTask = 'validate',
+): Promise<ModelCallResult> {
   const client = getClient();
 
   // Enforce per-call completion token cap

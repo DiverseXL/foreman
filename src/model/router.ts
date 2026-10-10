@@ -26,3 +26,13 @@ export function modelFor(task: ModelTask): string {
 export function patchFallbackModel(): string {
   return envModel("FOREMAN_MODEL_PATCH_FALLBACK", "nova-pro");
 }
+
+/**
+ * Independent validator model. MUST differ from the patch model so the writer
+ * never judges its own patch. Default nova-pro (a tiny json_schema probe against
+ * the gateway succeeded, see scripts/probe-nova.ts). Override with
+ * FOREMAN_MODEL_VALIDATOR.
+ */
+export function validatorModel(): string {
+  return envModel("FOREMAN_MODEL_VALIDATOR", "nova-pro");
+}

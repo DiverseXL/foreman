@@ -2,8 +2,13 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
-import { createWorkspace, commitAttempt, gitDiffRange, type WorkspaceResult } from '../run/workspace.js';
+import {
+  createWorkspace,
+  commitAttempt,
+  gitDiffRange,
+  resetToBase,
+  type WorkspaceResult,
+} from '../run/workspace.js';
 import { runTests, type TestRunResult } from '../run/tests.js';
 import { appendFact, readFacts, type PatchSource } from '../state/facts.js';
 import { deriveStatus } from '../state/derive.js';
@@ -16,21 +21,33 @@ import {
   buildSourceBundle,
   validateEditsPayload,
   type PatchEdit,
-  type ProposeResult,
-  type ApplyResult,
 } from '../patch/propose.js';
 import { collectChanges, callerCountFor } from '../policy/changed.js';
 import { loadPolicy, runGate } from '../policy/gate.js';
-import type { GateContext } from '../policy/types.js';
-import { withWorkflow, withStage, flushTelemetry, shutdownTelemetry } from '../telemetry/index.js';
-import { cumulativeCost, cumulativeTokens } from '../model/index.js';
+import {
+  runSupervisor,
+  writeRunReport,
+  writeEconomics,
+  type SupervisorEngine,
+  type SupervisorInstrument,
+  type SpanLike,
+} from '../run/supervisor.js';
+import { validatePatch } from '../validator/index.js';
+import {
+  withWorkflow,
+  withStage,
+  flushTelemetry,
+  shutdownTelemetry,
+  type SupportedSpanKind,
+} from '../telemetry/index.js';
+import { cumulativeCost, cumulativeTokens, runTotals, validatorModel } from '../model/index.js';
 
 interface CliArgs {
   command?: string;
   issue?: string;
   setupOnly: boolean;
   through?: string;
-  patchFrom?: string;
+  firstAttemptPatchFrom?: string;
 }
 
 function parseArgs(args: string[]): CliArgs {
@@ -45,8 +62,8 @@ function parseArgs(args: string[]): CliArgs {
     else if (arg === '--through') {
       result.through = args[i + 1];
       i++;
-    } else if (arg === '--patch-from') {
-      result.patchFrom = args[i + 1];
+    } else if (arg === '--first-attempt-patch-from' || arg === '--patch-from') {
+      result.firstAttemptPatchFrom = args[i + 1];
       i++;
     }
   }
@@ -99,21 +116,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const parsed = parseArgs(argv);
 
   if (parsed.command !== 'run' || !parsed.issue) {
-    console.error('Usage: foreman run --issue <n> [--setup-only] [--through context|tests] [--patch-from <file>]');
+    console.error(
+      'Usage: foreman run --issue <n> [--setup-only] [--through context] [--first-attempt-patch-from <file>]'
+    );
     process.exit(1);
   }
 
   const issueId = parsed.issue;
   const runId = `run-${Date.now()}`;
-  const throughTests = !parsed.setupOnly && (parsed.through === 'tests' || Boolean(parsed.patchFrom));
-  const shouldRunContext =
-    !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context' || throughTests);
+  const runDir = path.resolve(runDirPath(runId));
+  const startedAtMs = Date.now();
+  const firstAttemptPatchFrom = parsed.firstAttemptPatchFrom;
+  const shouldRunContext = !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context');
+  const runPipeline = !parsed.setupOnly && parsed.through !== 'context';
 
-  let rubricResult: RubricResult | undefined;
-  let proposeResult: ProposeResult | undefined;
-  let applyResult: ApplyResult | undefined;
-  let diffHash: string | undefined;
-  let finalTests: TestRunResult | undefined;
   let stoppedReason: string | undefined;
 
   const { traceId } = await withWorkflow(runId, issueId, async (_span, currentTraceId) => {
@@ -158,6 +174,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
     let mandate: Mandate | undefined;
     let contextBundle: ContextBundle | undefined;
+    let rubricResult: RubricResult | undefined;
 
     if (shouldRunContext) {
       mandate = await withStage(
@@ -196,248 +213,185 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       });
     }
 
-    if (throughTests && mandate && contextBundle) {
-      let patchSource: PatchSource = 'model';
+    let supervisorOutcome: { status: string; attempts: number; shipped: boolean } | undefined;
 
-      if (parsed.patchFrom) {
-        // ----- Injected patch (demonstration only; model skipped) -----
-        patchSource = 'injected';
-        console.log('=========================================');
-        console.log('INJECTED PATCH');
-        console.log(`Source: ${parsed.patchFrom}`);
-        console.log('Model calls skipped');
-        console.log('=========================================');
-
-        appendFact(runId, {
-          type: 'mandate_created',
-          issueId,
-          title: mandate.title,
-          criteriaCount: mandate.acceptanceCriteria.length,
-          hintedSymbols: mandate.hintedSymbols,
-          hintedPaths: mandate.hintedPaths,
-        });
-
-        try {
-          const edits = loadInjectedEdits(parsed.patchFrom);
-          proposeResult = { edits, model: 'injected', attempts: 0 };
-        } catch (err) {
-          stoppedReason = err instanceof Error ? err.message : String(err);
-        }
-      } else {
-        // ----- Rubric (LLM) -----
-        try {
-          rubricResult = await withStage(
-            'rubric',
-            'LLM',
-            async (stageSpan) => {
-              const rubric = await buildRubric(mandate!, runId);
-              stageSpan.setAttribute('foreman.llm.model', rubric.model);
-              stageSpan.setAttribute('foreman.rubric.criteria_count', rubric.criteria.length);
-              stageSpan.setAttribute('foreman.rubric.attempts', rubric.attempts);
-              if (rubric.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', rubric.usage.promptTokens);
-              if (rubric.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', rubric.usage.completionTokens);
-              return rubric;
-            },
-            { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
-          );
-        } catch (err) {
-          stoppedReason = err instanceof Error ? err.message : String(err);
-        }
-
-        if (rubricResult) {
-          appendFact(runId, {
-            type: 'mandate_created',
-            issueId,
-            title: mandate.title,
-            criteriaCount: rubricResult.criteria.length,
-            rubricCriteriaCount: rubricResult.criteria.length,
-            rubricModel: rubricResult.model,
-            hintedSymbols: mandate.hintedSymbols,
-            hintedPaths: mandate.hintedPaths,
-          });
-
-          // ----- Patch proposal (LLM) -----
-          const sources = buildSourceBundle(contextBundle, workspace.path);
-          try {
-            proposeResult = await withStage(
-              'patch_propose',
-              'LLM',
-              async (stageSpan) => {
-                const proposal = await proposePatch({ issue: mandate!, rubric: rubricResult!, sources }, runId);
-                stageSpan.setAttribute('foreman.llm.model', proposal.model);
-                stageSpan.setAttribute('foreman.patch.edit_count', proposal.edits.length);
-                stageSpan.setAttribute('foreman.patch.attempts', proposal.attempts);
-                stageSpan.setAttribute('foreman.patch.source_snippets', sources.length);
-                if (proposal.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', proposal.usage.promptTokens);
-                if (proposal.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', proposal.usage.completionTokens);
-                return proposal;
-              },
-              { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
-            );
-          } catch (err) {
-            stoppedReason = err instanceof Error ? err.message : String(err);
-          }
-        }
-      }
-
-      // ----- Apply (TOOL) -----
-      if (proposeResult) {
-        applyResult = await withStage(
-          'apply',
-          'TOOL',
+    if (runPipeline && mandate && contextBundle) {
+      // ----- Rubric (LLM) -----
+      try {
+        rubricResult = await withStage(
+          'rubric',
+          'LLM',
           async (stageSpan) => {
-            const res = applyEdits(workspace.path, proposeResult!.edits);
-            stageSpan.setAttribute('foreman.apply.ok', res.ok);
-            if (res.ok) stageSpan.setAttribute('foreman.apply.files', res.applied.length);
-            else stageSpan.setAttribute('foreman.apply.reason', res.reason);
-            return res;
+            const rubric = await buildRubric(mandate!, runId);
+            stageSpan.setAttribute('foreman.llm.model', rubric.model);
+            stageSpan.setAttribute('foreman.rubric.criteria_count', rubric.criteria.length);
+            if (rubric.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', rubric.usage.promptTokens);
+            if (rubric.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', rubric.usage.completionTokens);
+            return rubric;
           },
           { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
         );
-
-        if (!applyResult.ok) {
-          appendFact(runId, {
-            type: 'attempt_failed',
-            attempt: 1,
-            failureClass: applyResult.reason.includes('times') ? 'stuck_duplicate' : 'no_evidence',
-          });
-          stoppedReason = `Patch application failed: ${applyResult.reason}`;
-        }
+      } catch (err) {
+        stoppedReason = err instanceof Error ? err.message : String(err);
       }
 
-      // ----- Commit attempt, diff, hash, patch_proposed, then gate -----
-      if (applyResult?.ok) {
-        const attemptCommit = commitAttempt(workspace.path, `attempt-1 (${patchSource})`);
-        const changeSummary = collectChanges(workspace.path, workspace.baseCommit, attemptCommit);
-        const diff = gitDiffRange(workspace.path, workspace.baseCommit, attemptCommit);
-        diffHash = crypto.createHash('sha256').update(diff).digest('hex');
-        appendFact(runId, { type: 'patch_proposed', attempt: 1, diffHash, patchSource });
-
-        const dir = ensureRunDir(runId);
-        fs.writeFileSync(path.join(dir, 'attempt-1.diff'), diff + '\n', 'utf-8');
-
-        // ----- Policy gate (GUARDRAIL) -----
-        const contextSymbols = new Set<string>();
-        for (const sf of contextBundle.symbolFacts) contextSymbols.add(sf.symbol);
-        for (const f of contextBundle.findings) contextSymbols.add(f.symbol);
-
-        const symbolCallerCounts: Record<string, number> = {};
-        for (const sf of contextBundle.symbolFacts) symbolCallerCounts[sf.symbol] = sf.callerCount;
-        for (const symbol of changeSummary.changedSymbols) {
-          if (!(symbol.name in symbolCallerCounts)) {
-            const count = callerCountFor(workspace.path, symbol.name);
-            if (count !== null) symbolCallerCounts[symbol.name] = count;
-          }
-        }
-
-        const gateContext: GateContext = {
-          changedFiles: changeSummary.changedFiles,
-          changedSymbols: changeSummary.changedSymbols,
-          addedLines: changeSummary.addedLines,
-          contextSymbols: Array.from(contextSymbols),
-          symbolCallerCounts,
-        };
-
-        const policy = loadPolicy();
-        const gate = await withStage(
-          'policy_gate',
-          'GUARDRAIL',
-          async (stageSpan) => {
-            const result = runGate(gateContext, policy);
-            stageSpan.setAttribute('foreman.gate.failed_count', result.failedRules.length);
-            stageSpan.setAttribute('foreman.gate.failed_rules', result.failedRules.join(','));
-            stageSpan.setAttribute('foreman.gate.symbol_method', changeSummary.method);
-            return result;
-          },
-          { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
-        );
-
-        appendFact(runId, {
-          type: 'gate_result',
-          attempt: 1,
-          passed: gate.passed,
-          failedRules: gate.failedRules,
-        });
-
-        fs.writeFileSync(
-          path.join(dir, 'gate-1.json'),
-          JSON.stringify(
-            {
-              attempt: 1,
-              passed: gate.passed,
-              failedRules: gate.failedRules,
-              changedSymbolMethod: changeSummary.method,
-              changedSymbolNote: changeSummary.note,
-              changedFiles: changeSummary.changedFiles,
-              changedSymbols: changeSummary.changedSymbols,
-              rules: gate.rules,
-            },
-            null,
-            2
-          ) + '\n',
-          'utf-8'
-        );
-
-        if (!gate.passed) {
-          // Fail closed: do NOT run the tests.
-          appendFact(runId, { type: 'attempt_failed', attempt: 1, failureClass: 'blocked_policy' });
-          stoppedReason = `Policy gate blocked the attempt (failed rules: ${gate.failedRules.join(', ')}); tests were not run.`;
-        } else {
-          // ----- Tests (EVALUATOR) -----
-          finalTests = await withStage(
-            'tests',
-            'EVALUATOR',
-            async (stageSpan) => {
-              const testRes = runTests(workspace.path);
-              stageSpan.setAttribute('foreman.tests.passed', testRes.passed);
-              stageSpan.setAttribute('foreman.tests.failed', testRes.failed);
-              stageSpan.setAttribute('foreman.tests.exit_code', testRes.exitCode);
-              stageSpan.setAttribute('foreman.tests.duration_ms', testRes.durationMs);
-              return testRes;
-            },
-            { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
-          );
-
-          const targetName = `repro-issue-${issueId}`;
-          const targetPassed =
-            finalTests.passingTests.includes(targetName) && !finalTests.failingTests.includes(targetName);
-          const baselinePassing = new Set(baseline.passingTests);
-          const regressions = finalTests.failingTests.filter((t) => baselinePassing.has(t));
-          const testsPassed = targetPassed && regressions.length === 0;
-
-          appendFact(runId, {
-            type: 'tests_result',
-            attempt: 1,
-            passed: testsPassed,
-            targetPassed,
-            regressions,
-            failingTests: finalTests.failingTests,
-          });
-
-          fs.writeFileSync(path.join(runDirPath(runId), 'tests-1.txt'), finalTests.output, 'utf-8');
-        }
-      }
-    } else if (mandate) {
       appendFact(runId, {
         type: 'mandate_created',
         issueId,
         title: mandate.title,
-        criteriaCount: mandate.acceptanceCriteria.length,
+        criteriaCount: rubricResult ? rubricResult.criteria.length : mandate.acceptanceCriteria.length,
+        rubricCriteriaCount: rubricResult?.criteria.length,
+        rubricModel: rubricResult?.model,
         hintedSymbols: mandate.hintedSymbols,
         hintedPaths: mandate.hintedPaths,
       });
+
+      if (rubricResult) {
+        const sources = buildSourceBundle(contextBundle, workspace.path);
+        const policy = loadPolicy();
+
+        const contextSymbols = new Set<string>();
+        for (const sf of contextBundle.symbolFacts) contextSymbols.add(sf.symbol);
+        for (const f of contextBundle.findings) contextSymbols.add(f.symbol);
+
+        const evidenceText = [
+          contextBundle.notes,
+          ...contextBundle.symbolFacts.map(
+            (sf) => `symbol ${sf.symbol} (${sf.file ?? 'unknown'}): callers=${sf.callerCount} callees=${sf.calleeCount}`
+          ),
+          ...contextBundle.findings.slice(0, 40).map((f) => `${f.kind} ${f.symbol} @ ${f.file}: ${f.evidence}`),
+        ].join('\n');
+
+        let firstAttemptPatch: PatchEdit[] | undefined;
+        if (firstAttemptPatchFrom) {
+          firstAttemptPatch = loadInjectedEdits(firstAttemptPatchFrom);
+          console.log('=========================================');
+          console.log('INJECTED FIRST ATTEMPT');
+          console.log(`Source: ${firstAttemptPatchFrom}`);
+          console.log('Attempt 1 uses this injected patch; attempts 2+ come from the model.');
+          console.log('=========================================');
+        }
+
+        const engine: SupervisorEngine = {
+          reset: () => resetToBase(workspace.path, workspace.baseCommit),
+          propose: async ({ attempt, memoryText, injected }) => {
+            if (injected) {
+              return { edits: injected, model: 'injected', patchSource: 'injected' as PatchSource };
+            }
+            const proposal = await withStage(
+              'patch_propose',
+              'LLM',
+              async (stageSpan) => {
+                const p = await proposePatch({ issue: mandate!, rubric: rubricResult!, sources, memoryText }, runId);
+                stageSpan.setAttribute('foreman.llm.model', p.model);
+                stageSpan.setAttribute('foreman.patch.edit_count', p.edits.length);
+                stageSpan.setAttribute('foreman.patch.attempts', p.attempts);
+                stageSpan.setAttribute('foreman.patch.memory_chars', memoryText.length);
+                if (p.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', p.usage.promptTokens);
+                if (p.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', p.usage.completionTokens);
+                return p;
+              },
+              { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.attempt': attempt }
+            );
+            return { edits: proposal.edits, model: proposal.model, patchSource: 'model' as PatchSource };
+          },
+          apply: (edits) => applyEdits(workspace.path, edits),
+          commit: (message) => commitAttempt(workspace.path, message),
+          diff: (base, head) => gitDiffRange(workspace.path, base, head),
+          collect: (base, head) => collectChanges(workspace.path, base, head),
+          gate: (ctx) => runGate(ctx, policy),
+          tests: () => runTests(workspace.path),
+          validate: (input) =>
+            withStage(
+              'validator',
+              'EVALUATOR',
+              () => validatePatch(input, runId, policy.validatorMinConfidence),
+              { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.validator.model': validatorModel() }
+            ),
+          callerCount: (symbol) => callerCountFor(workspace.path, symbol),
+        };
+
+        const instrument: SupervisorInstrument = {
+          runAgent: (fn) =>
+            withStage('supervisor', 'AGENT', (span) => fn(span as SpanLike), {
+              'foreman.run_id': runId,
+              'foreman.issue_id': issueId,
+            }),
+          runAttempt: (attempt, fn) =>
+            withStage(
+              `attempt-${attempt}`,
+              'CHAIN',
+              async (span) => {
+                span.setAttribute('foreman.attempt', attempt);
+                return await fn((outcome) => span.setAttribute('foreman.attempt.outcome', outcome));
+              },
+              { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
+            ),
+          stage: (name, kind, fn, attrs) =>
+            withStage(name, kind as SupportedSpanKind, async (span) => await fn(span as SpanLike), attrs),
+        };
+
+        try {
+          const outcome = await runSupervisor({
+            runId,
+            issueId,
+            runDir,
+            policy,
+            rubric: rubricResult,
+            context: {
+              contextSymbols: Array.from(contextSymbols),
+              symbolFacts: contextBundle.symbolFacts.map((sf) => ({ symbol: sf.symbol, callerCount: sf.callerCount })),
+              evidenceText,
+            },
+            baseCommit: workspace.baseCommit,
+            engine,
+            baselinePassing: baseline.passingTests,
+            firstAttemptPatch,
+            instrument,
+            totals: () => runTotals(runId),
+            wallClockMs: () => Date.now() - startedAtMs,
+            log: (line) => console.log(line),
+          });
+          supervisorOutcome = { status: outcome.status, attempts: outcome.attempts, shipped: outcome.shipped };
+
+          // ----- Reports (derived only from facts and the ledger) -----
+          const facts = readFacts(runId);
+          const status = deriveStatus(facts);
+          const totals = runTotals(runId);
+          const wallMs = Date.now() - startedAtMs;
+          writeRunReport(
+            {
+              runId,
+              runDir,
+              issueId,
+              issueTitle: mandate.title,
+              traceId: currentTraceId,
+              injected: Boolean(firstAttemptPatchFrom),
+              memory: outcome.memory,
+              outcome: status,
+              attempts: outcome.attempts,
+            },
+            facts,
+            totals,
+            wallMs
+          );
+          writeEconomics(runDir, { runId, outcome: status, attempts: outcome.attempts }, totals, wallMs);
+        } catch (err) {
+          stoppedReason = err instanceof Error ? err.message : String(err);
+        }
+      }
     }
 
     // ----- Console summary (no emojis) -----
     const facts = readFacts(runId);
     const derivedStatus = deriveStatus(facts);
 
-    console.log('Foreman Run Summary');
+    console.log('\nForeman Run Summary');
     console.log('===================');
     console.log(`Run ID: ${runId}`);
     console.log(`Issue: ${issueId}`);
-    console.log(`Through: ${throughTests ? 'tests' : shouldRunContext ? 'context' : 'setup'}`);
-    if (parsed.patchFrom) console.log(`Patch Source: INJECTED (${parsed.patchFrom})`);
+    console.log(`Stage: ${parsed.setupOnly ? 'setup' : parsed.through === 'context' ? 'context' : 'full run'}`);
+    if (firstAttemptPatchFrom) console.log(`Injected first attempt: ${firstAttemptPatchFrom}`);
     console.log(`Derived Status: ${derivedStatus}`);
     console.log(`Trace ID: ${currentTraceId}`);
     console.log(`Workspace Path: ${workspace.path}`);
@@ -452,25 +406,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       console.log('\nMandate Summary');
       console.log('---------------');
       console.log(`Title: ${mandate.title}`);
-      console.log(`Summary: ${mandate.summary}`);
       console.log(`Acceptance Criteria (${mandate.acceptanceCriteria.length}):`);
       for (const c of mandate.acceptanceCriteria) console.log(`  - ${c}`);
-      if (mandate.hintedSymbols.length > 0) console.log(`Hinted Symbols: ${mandate.hintedSymbols.join(', ')}`);
-      if (mandate.hintedPaths.length > 0) console.log(`Hinted Paths: ${mandate.hintedPaths.join(', ')}`);
-    }
-
-    if (contextBundle) {
-      console.log('\nStructural Context Summary');
-      console.log('--------------------------');
-      if (contextBundle.indexSummary) {
-        console.log(
-          `Index: ${contextBundle.indexSummary.files} files, ${contextBundle.indexSummary.symbols} symbols, ${contextBundle.indexSummary.relations} relations (completeness: ${contextBundle.indexSummary.completeness})`
-        );
-      }
-      console.log(`Findings: ${contextBundle.findings.length}; symbolFacts: ${contextBundle.symbolFacts.length}`);
-      for (const sf of contextBundle.symbolFacts) {
-        console.log(`  symbol ${sf.symbol} (${sf.file}): callers=${sf.callerCount} callees=${sf.calleeCount}`);
-      }
     }
 
     if (rubricResult) {
@@ -480,33 +417,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       for (const c of rubricResult.criteria) console.log(`  [${c.check}] ${c.id}: ${c.text}`);
     }
 
-    if (proposeResult) {
-      console.log(`\nPatch Proposal (source: ${parsed.patchFrom ? 'INJECTED' : 'model'})`);
-      console.log('--------------');
-      console.log(`Model: ${proposeResult.model}`);
-      for (const e of proposeResult.edits) {
-        const firstLine = e.search.split('\n')[0].slice(0, 70);
-        console.log(`  edit ${e.file}: search[${e.search.length} chars] starts "${firstLine}"`);
+    if (supervisorOutcome) {
+      console.log('\nSupervisor');
+      console.log('----------');
+      console.log(`Attempts used: ${supervisorOutcome.attempts}`);
+      console.log(`Shipped: ${supervisorOutcome.shipped}`);
+      if (supervisorOutcome.shipped) {
+        console.log('Ships as: a commit on the run branch inside the run copy, plus proposed.patch in the run directory.');
+        console.log('NO pull request was opened.');
+      } else if (derivedStatus === 'needs_human' || derivedStatus === 'budget_exhausted') {
+        console.log(`Terminal stop: ${derivedStatus}. See ${path.relative(process.cwd(), path.join(runDir, 'NEEDS_HUMAN.md'))}.`);
       }
-      if (applyResult) {
-        console.log(`Apply: ${applyResult.ok ? `ok (${applyResult.applied.length} file(s))` : `FAILED (${applyResult.reason})`}`);
-      }
-      if (diffHash) console.log(`Diff Hash (sha256): ${diffHash}`);
-    }
-
-    if (finalTests) {
-      console.log('\nPost-Patch Tests');
-      console.log('----------------');
-      console.log(
-        `Result: ${finalTests.passed} passed, ${finalTests.failed} failed, exit code ${finalTests.exitCode} (${finalTests.durationMs}ms)`
-      );
-      const targetName = `repro-issue-${issueId}`;
-      const targetPassed = finalTests.passingTests.includes(targetName) && !finalTests.failingTests.includes(targetName);
-      const baselinePassing = new Set(baseline.passingTests);
-      const regressions = finalTests.failingTests.filter((t) => baselinePassing.has(t));
-      console.log(`targetPassed (${targetName}): ${targetPassed}`);
-      console.log(`regressions: ${regressions.length === 0 ? 'none' : regressions.join(', ')}`);
-      if (finalTests.failingTests.length > 0) console.log(`Failing Tests: ${finalTests.failingTests.join(', ')}`);
+      console.log(`Report: ${path.relative(process.cwd(), path.join(runDir, 'report.md'))}`);
+      console.log(`Economics: ${path.relative(process.cwd(), path.join(runDir, 'economics.json'))}`);
     }
 
     if (stoppedReason) {
@@ -521,7 +444,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.log('------');
     console.log(`Model calls tokens (all runs): prompt=${totals.prompt} completion=${totals.completion} total=${totals.total}`);
     console.log(`Cost (all runs, gateway-reported where available): $${cost.toFixed(6)}`);
-
     console.log(`\nFacts Count: ${facts.length}`);
 
     return { derivedStatus };

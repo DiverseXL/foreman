@@ -5,6 +5,7 @@ export type ForemanStatus =
   | 'blocked_policy'
   | 'tests_failing'
   | 'rejected_validator'
+  | 'patch_failed'
   | 'budget_exhausted'
   | 'needs_human'
   | 'ready_to_ship'
@@ -78,6 +79,9 @@ export function deriveStatus(facts: readonly Fact[]): ForemanStatus {
       }
       if (attemptFailed.failureClass === 'rejected_validator') {
         return 'rejected_validator';
+      }
+      if (attemptFailed.failureClass === 'apply_failed') {
+        return 'patch_failed';
       }
     }
 

@@ -14,6 +14,14 @@ export interface Policy {
   maxFiles: number;
   maxChangedLines: number;
   maxTransitiveCallers: number;
+  /** Supervisor: maximum patch attempts per run (added in step 7). */
+  maxAttempts: number;
+  /** Validator: minimum confidence for a "pass" verdict to count (added in step 7). */
+  validatorMinConfidence: number;
+  /** Budget: per-run token cap (added in step 7). */
+  maxTokensPerRun: number;
+  /** Budget: per-run wall-clock cap in seconds (added in step 7). */
+  maxWallSeconds: number;
   lockfiles: string[];
   secretPatterns: string[];
 }

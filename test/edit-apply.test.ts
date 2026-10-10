@@ -82,4 +82,32 @@ describe('applyEdits exact-once rule', () => {
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, /escapes repo/);
   });
+
+  it('applies a multi-line LF search to a CRLF file and preserves CRLF', () => {
+    writeFixture('crlf.ts', 'export function g(): number {\r\n  const a = 1;\r\n  return a;\r\n}\r\n');
+    const result = applyEdits(scratch, [
+      {
+        file: 'crlf.ts',
+        search: '  const a = 1;\n  return a;',
+        replace: '  const a = 2;\n  return a * 2;',
+      },
+    ]);
+    assert.equal(result.ok, true);
+    const out = fs.readFileSync(path.join(scratch, 'crlf.ts'), 'utf-8');
+    assert.equal(out.includes('const a = 2;'), true);
+    // The file's CRLF style must be preserved (no whole-file rewrite).
+    assert.equal(out.includes('const a = 2;\r\n  return a * 2;'), true);
+    assert.equal(/[^\r]\n/.test(out), false);
+  });
+
+  it('applies a CRLF search to an LF file and keeps LF', () => {
+    writeFixture('lf.ts', 'export function h(): number {\n  return 5;\n}\n');
+    const result = applyEdits(scratch, [
+      { file: 'lf.ts', search: '  return 5;\r\n', replace: '  return 6;\r\n' },
+    ]);
+    assert.equal(result.ok, true);
+    const out = fs.readFileSync(path.join(scratch, 'lf.ts'), 'utf-8');
+    assert.equal(out.includes('return 6;'), true);
+    assert.equal(out.includes('\r'), false);
+  });
 });

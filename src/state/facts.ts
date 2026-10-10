@@ -7,6 +7,7 @@ export type AttemptFailureClass =
   | 'blocked_policy'
   | 'tests_failed'
   | 'rejected_validator'
+  | 'apply_failed'
   | 'error_transient'
   | 'no_evidence'
   | 'stuck_duplicate';
@@ -46,8 +47,23 @@ export type FactPayload =
       regressions?: string[];
       failingTests: string[];
     }
-  | { type: 'validator_result'; attempt: number; allCriteriaPass: boolean }
+  | {
+      type: 'validator_result';
+      attempt: number;
+      allCriteriaPass: boolean;
+      /** validator model name */
+      model?: string;
+      /** per-criterion verdicts */
+      criteria?: { id: string; verdict: string; confidence: number; reason: string }[];
+    }
   | { type: 'attempt_failed'; attempt: number; failureClass: AttemptFailureClass }
+  | {
+      type: 'error_transient';
+      /** deliberately NOT named "attempt": transient errors must not shift derived status */
+      duringAttempt: number;
+      error: string;
+      retries: number;
+    }
   | { type: 'budget_checked'; exhausted: boolean }
   | { type: 'needs_human'; reason: string }
   | { type: 'shipped' };

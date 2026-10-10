@@ -14,6 +14,10 @@
   "maxFiles": 3,
   "maxChangedLines": 40,
   "maxTransitiveCallers": 10,
+  "maxAttempts": 3,
+  "validatorMinConfidence": 0.7,
+  "maxTokensPerRun": 60000,
+  "maxWallSeconds": 300,
   "lockfiles": ["package.json", "package-lock.json"],
   "secretPatterns": [
     "sk-[A-Za-z0-9]{20,}",

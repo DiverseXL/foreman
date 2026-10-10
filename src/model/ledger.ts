@@ -68,7 +68,8 @@ export interface ModelCallCosts {
 // ---------------------------------------------------------------------------
 
 export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 4000;
-export const STEP_MAX_TOTAL_TOKENS = 40000;
+// Step-7 budget: at most 120000 total tokens across the step's runs.
+export const STEP_MAX_TOTAL_TOKENS = 120000;
 export const STEP_MAX_PATCH_ATTEMPTS = 1;
 
 /** Safety reserve, in USD, kept below the gateway key's max budget. */
@@ -189,6 +190,33 @@ export function cumulativeTokens(runsDir = 'runs'): { prompt: number; completion
   const prompt = entries.reduce((sum, entry) => sum + entry.promptTokens, 0);
   const completion = entries.reduce((sum, entry) => sum + entry.completionTokens, 0);
   return { prompt, completion, total: prompt + completion };
+}
+
+export interface RunTotals {
+  prompt: number;
+  completion: number;
+  total: number;
+  cost: number;
+  keySpendUsd: number | null;
+  keyMaxBudgetUsd: number | null;
+}
+
+/** Totals for a single run, computed only from the ledger. */
+export function runTotals(runId: string, runsDir = 'runs'): RunTotals {
+  const entries = readLedger(getLedgerPath(runsDir)).filter((e) => e.runId === runId);
+  const prompt = entries.reduce((sum, entry) => sum + entry.promptTokens, 0);
+  const completion = entries.reduce((sum, entry) => sum + entry.completionTokens, 0);
+  const cost = entries.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
+  let keySpendUsd: number | null = null;
+  let keyMaxBudgetUsd: number | null = null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].keySpendUsd !== null || entries[i].keyMaxBudgetUsd !== null) {
+      keySpendUsd = entries[i].keySpendUsd ?? null;
+      keyMaxBudgetUsd = entries[i].keyMaxBudgetUsd ?? null;
+      break;
+    }
+  }
+  return { prompt, completion, total: prompt + completion, cost, keySpendUsd, keyMaxBudgetUsd };
 }
 
 /**

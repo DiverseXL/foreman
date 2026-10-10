@@ -29,6 +29,16 @@ export function commitAttempt(repoPath: string, message: string): string {
   return execSync('git rev-parse HEAD', { cwd: repoPath, stdio: 'pipe' }).toString('utf-8').trim();
 }
 
+/**
+ * Resets the run copy's branch back to the base commit, discarding any previous
+ * attempt commit and cleaning the working tree. Used by the supervisor before
+ * every attempt so each attempt starts from a known-clean state.
+ */
+export function resetToBase(repoPath: string, baseCommit: string): void {
+  execSync(`git reset --hard ${baseCommit}`, { cwd: repoPath, stdio: 'pipe' });
+  execSync('git clean -fd', { cwd: repoPath, stdio: 'pipe' });
+}
+
 /** Diff between two commits in the run copy (used for the gate and patch artifacts). */
 export function gitDiffRange(repoPath: string, base: string, head: string): string {
   return execSync(`git diff ${base} ${head} --no-color --no-ext-diff`, {
@@ -94,6 +104,11 @@ export function createWorkspace(
   execSync('git init', { cwd: repoPath, stdio: 'pipe' });
   execSync(`git config --local user.name "${throwawayIdentity.name}"`, { cwd: repoPath, stdio: 'pipe' });
   execSync(`git config --local user.email "${throwawayIdentity.email}"`, { cwd: repoPath, stdio: 'pipe' });
+  // Pin the isolated run copy to LF. The host's global core.autocrlf=true would
+  // otherwise materialise CRLF on every `git reset --hard`, so a model's
+  // LF newlines in multi-line "search" strings would fail to match.
+  execSync('git config --local core.autocrlf false', { cwd: repoPath, stdio: 'pipe' });
+  execSync('git config --local core.eol lf', { cwd: repoPath, stdio: 'pipe' });
 
   // 3. Baseline commit
   execSync('git add .', { cwd: repoPath, stdio: 'pipe' });

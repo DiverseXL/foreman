@@ -212,11 +212,14 @@ function formatSources(sources: SourceSnippet[]): string {
 }
 
 export async function proposePatch(
-  input: { issue: Mandate; rubric: RubricResult; sources: SourceSnippet[] },
+  input: { issue: Mandate; rubric: RubricResult; sources: SourceSnippet[]; memoryText?: string },
   runId: string,
   callModel: ProposeCallModel = defaultCallModel
 ): Promise<ProposeResult> {
   const criteriaText = input.rubric.criteria.map((c) => `- [${c.check}] ${c.id}: ${c.text}`).join('\n');
+  const memorySection = input.memoryText?.trim()
+    ? `Failure memory from previous attempts. Do NOT repeat any approach that already failed; choose a materially different edit.\n${input.memoryText.trim()}\n\n`
+    : '';
 
   const baseMessages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -225,6 +228,7 @@ export async function proposePatch(
       content:
         `Issue:\n${input.issue.title}\n\n${input.issue.summary}\n\n` +
         `Rubric criteria:\n${criteriaText}\n\n` +
+        memorySection +
         `Relevant source (authoritative; copy "search" verbatim from here):\n\n${formatSources(input.sources)}\n\n` +
         'Return the JSON edit list.',
     },
@@ -284,6 +288,24 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 /**
+ * Line-ending tolerance.
+ *
+ * The patch model emits LF newlines, but a checkout on a host with
+ * core.autocrlf=true can materialise CRLF files (this happened: the run copy's
+ * files were CRLF after `git reset --hard`, so multi-line LF search strings
+ * failed to match). We match on an LF-normalised view and restore the file's
+ * original ending style, so an LF search matches a CRLF file and vice versa.
+ */
+function toLf(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
+function restoreLineEndings(text: string, crlf: boolean): string {
+  const lf = toLf(text);
+  return crlf ? lf.replace(/\n/g, '\r\n') : lf;
+}
+
+/**
  * Applies edits to the run copy. Every search string must occur exactly once in
  * its file; otherwise the attempt fails and NOTHING is written. Validates all
  * edits against in-memory content first, then writes all files.
@@ -309,7 +331,13 @@ export function applyEdits(repoPath: string, edits: PatchEdit[]): ApplyResult {
       current = fs.readFileSync(fullPath, 'utf-8');
     }
 
-    const occurrences = countOccurrences(current, edit.search);
+    // Match on an LF-normalised view so the model's LF output applies to a file
+    // that the run copy materialised as CRLF (or vice versa).
+    const usesCrlf = current.includes('\r\n');
+    const haystack = toLf(current);
+    const needle = toLf(edit.search);
+
+    const occurrences = countOccurrences(haystack, needle);
     if (occurrences === 0) {
       return { ok: false, reason: `search string not found in ${edit.file}`, index, file: edit.file };
     }
@@ -322,7 +350,8 @@ export function applyEdits(repoPath: string, edits: PatchEdit[]): ApplyResult {
       };
     }
 
-    contents.set(fullPath, current.replace(edit.search, edit.replace));
+    const replaced = haystack.replace(needle, toLf(edit.replace));
+    contents.set(fullPath, restoreLineEndings(replaced, usesCrlf));
     applied.push({ file: edit.file, replacedChars: edit.search.length });
   }
 

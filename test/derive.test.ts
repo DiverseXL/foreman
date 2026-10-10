@@ -157,4 +157,25 @@ describe('deriveStatus pure function', () => {
     ];
     assert.equal(deriveStatus(facts), 'tests_failing');
   });
+
+  it('returns "patch_failed" when the latest attempt could not be applied', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'run_started', runId: 'run-1', issueId: '1' },
+      { seq: 2, ts: '2026-10-10T10:00:01Z', type: 'patch_proposed', attempt: 1, diffHash: 'h1' },
+      { seq: 3, ts: '2026-10-10T10:00:02Z', type: 'attempt_failed', attempt: 1, failureClass: 'apply_failed' },
+    ];
+    assert.equal(deriveStatus(facts), 'patch_failed');
+  });
+
+  it('transient errors never shift the derived status', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'run_started', runId: 'run-1', issueId: '1' },
+      { seq: 2, ts: '2026-10-10T10:00:01Z', type: 'error_transient', duringAttempt: 1, error: 'rate limit', retries: 1 },
+      { seq: 3, ts: '2026-10-10T10:00:02Z', type: 'patch_proposed', attempt: 1, diffHash: 'h1' },
+      { seq: 4, ts: '2026-10-10T10:00:03Z', type: 'gate_result', attempt: 1, passed: true, failedRules: [] },
+      { seq: 5, ts: '2026-10-10T10:00:04Z', type: 'tests_result', attempt: 1, passed: true, failingTests: [] },
+      { seq: 6, ts: '2026-10-10T10:00:05Z', type: 'validator_result', attempt: 1, allCriteriaPass: true },
+    ];
+    assert.equal(deriveStatus(facts), 'ready_to_ship');
+  });
 });
