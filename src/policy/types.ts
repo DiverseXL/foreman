@@ -18,6 +18,8 @@ export interface Policy {
   maxAttempts: number;
   /** Validator: minimum confidence for a "pass" verdict to count (added in step 7). */
   validatorMinConfidence: number;
+  /** Validator: allow ONE evidence-escalation re-run when only unclear verdicts block (added in step 8). */
+  validatorEscalation: boolean;
   /** Budget: per-run token cap (added in step 7). */
   maxTokensPerRun: number;
   /** Budget: per-run wall-clock cap in seconds (added in step 7). */

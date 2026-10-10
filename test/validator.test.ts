@@ -60,6 +60,27 @@ describe('validator payload enforcement (pure)', () => {
     if (!result.ok) assert.match(result.errors.join(';'), /confidence: must be between 0 and 1/);
   });
 
+  it('rejects an "unclear" verdict with empty missing_evidence', () => {
+    const result = validateValidatorPayload(
+      { criteria: [{ id: 'r1', verdict: 'unclear', confidence: 0.5, reason: 'cannot tell', missing_evidence: '   ' }] },
+      ['r1']
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.errors.join(';'), /missing_evidence: must be non-empty/);
+  });
+
+  it('accepts an "unclear" verdict with non-empty missing_evidence', () => {
+    const result = validateValidatorPayload(
+      {
+        criteria: [
+          { id: 'r1', verdict: 'unclear', confidence: 0.5, reason: 'cannot tell', missing_evidence: 'need the caller source' },
+        ],
+      },
+      ['r1']
+    );
+    assert.equal(result.ok, true);
+  });
+
   it('truncates reasons to 200 characters', () => {
     const longReason = 'x'.repeat(260);
     const result = validateValidatorPayload(
@@ -78,8 +99,19 @@ describe('validator payload enforcement (pure)', () => {
 
 describe('allCriteriaPass is computed in code with a confidence floor', () => {
   const criteria = (confidence: number): ValidatorCriterion[] => [
-    { id: 'r1', verdict: 'pass', confidence, reason: 'ok' },
+    { id: 'r1', verdict: 'pass', confidence, reason: 'ok', missing_evidence: '' },
   ];
+
+  it('does not pass when a criterion is "unclear" even at high confidence', () => {
+    assert.equal(
+      computeAllCriteriaPass(
+        [{ id: 'r1', verdict: 'unclear', confidence: 0.99, reason: 'cannot tell', missing_evidence: 'x' }],
+        ['r1'],
+        0.7
+      ),
+      false
+    );
+  });
 
   it('passes when every criterion is pass at or above the floor', () => {
     assert.equal(computeAllCriteriaPass(criteria(0.7), ['r1'], 0.7), true);
@@ -89,10 +121,5 @@ describe('allCriteriaPass is computed in code with a confidence floor', () => {
     assert.equal(computeAllCriteriaPass(criteria(0.69), ['r1'], 0.7), false);
   });
 
-  it('does not pass when a criterion is "unclear" even at high confidence', () => {
-    assert.equal(
-      computeAllCriteriaPass([{ id: 'r1', verdict: 'unclear', confidence: 0.99, reason: 'cannot tell' }], ['r1'], 0.7),
-      false
-    );
-  });
+
 });

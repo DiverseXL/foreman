@@ -76,6 +76,14 @@ export function validateRubricPayload(raw: unknown): RubricValidation {
     }
     ids.add(criterion.id);
   }
+  // At least one criterion must need judgment, so the independent validator always
+  // has something to review (criteria with check "test" are covered by code).
+  if (!criteria.some((c) => c.check === 'diff' || c.check === 'behavior')) {
+    return {
+      ok: false,
+      errors: ['$.criteria: at least one criterion must have check "diff" or "behavior"'],
+    };
+  }
   return { ok: true, criteria };
 }
 
@@ -119,10 +127,14 @@ function issueText(issue: Mandate): string {
 const SYSTEM_PROMPT =
   'You convert a software issue into a short, checkable acceptance rubric. ' +
   'Return ONLY JSON matching the provided schema. Produce between 3 and 6 criteria. ' +
-  'Each criterion must be objectively checkable and must set "check" to one of: ' +
-  '"test" (verified by running the target test suite), ' +
-  '"diff" (verified by inspecting the change to the source), ' +
-  '"behavior" (a specific runtime behavior that must hold). ' +
+  'Each criterion must set "check" to one of: ' +
+  '"test" (verified by running an existing test; name that test in the text), ' +
+  '"diff" (verified by inspecting the change to the source; state the diff property), ' +
+  '"behavior" (a specific runtime behavior; state the call site or function that shows it). ' +
+  'Every "text" MUST state the concrete evidence that would verify it: the name of a test, a diff property, ' +
+  'or a call site. Every criterion must be verifiable from the issue text, the change diff, and the test results. ' +
+  'Reject criteria that assert behavior of code unrelated to this issue: only reference the functions, files and ' +
+  'tests the issue is about. Include at least one criterion with check "diff" or "behavior". ' +
   'Keep each "text" under 200 characters. Use short stable ids like "r1", "r2".';
 
 export async function buildRubric(

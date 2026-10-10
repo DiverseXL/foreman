@@ -1,0 +1,31 @@
+{
+  "attempt": 3,
+  "model": "nova-pro",
+  "minConfidence": 0.7,
+  "escalated": true,
+  "allCriteriaPass": true,
+  "judgmentAllPass": true,
+  "criteria": [
+    {
+      "id": "r2",
+      "verdict": "pass",
+      "confidence": 1,
+      "reason": "The diff shows Math.ceil is used instead of roundCurrency.",
+      "missing_evidence": ""
+    },
+    {
+      "id": "r3",
+      "verdict": "pass",
+      "confidence": 1,
+      "reason": "The escalation evidence shows roundCurrency remains unchanged.",
+      "missing_evidence": ""
+    },
+    {
+      "id": "r4",
+      "verdict": "pass",
+      "confidence": 1,
+      "reason": "The test outcome shows no regressions and the escalation evidence confirms the behavior change.",
+      "missing_evidence": ""
+    }
+  ]
+}

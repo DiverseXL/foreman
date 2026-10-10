@@ -23,7 +23,18 @@ describe('run workspace line endings', () => {
         'after reset to base the file should still be LF'
       );
     } finally {
-      fs.rmSync(path.join('runs', runId), { recursive: true, force: true });
+      // Remove the node_modules junction first; deleting a directory that still
+      // contains a junction can fail with EPERM on Windows.
+      try {
+        fs.rmSync(path.join('runs', runId, 'repo', 'node_modules'), { force: true });
+      } catch {
+        // ignore
+      }
+      try {
+        fs.rmSync(path.join('runs', runId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch {
+        // best-effort cleanup; runs/ is gitignored
+      }
     }
   });
 });

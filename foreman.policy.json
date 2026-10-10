@@ -16,6 +16,7 @@
   "maxTransitiveCallers": 10,
   "maxAttempts": 3,
   "validatorMinConfidence": 0.7,
+  "validatorEscalation": true,
   "maxTokensPerRun": 60000,
   "maxWallSeconds": 300,
   "lockfiles": ["package.json", "package-lock.json"],

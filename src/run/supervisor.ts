@@ -23,6 +23,13 @@ import type { ChangeSummary } from '../policy/changed.js';
 import type { GateContext, GateResult, Policy } from '../policy/types.js';
 import type { TestRunResult } from '../run/tests.js';
 import { ValidatorError, type ValidatorInput, type ValidatorRunResult } from '../validator/index.js';
+import {
+  buildCodeVerdicts,
+  allCodePass,
+  partitionRubric,
+  combineAllCriteriaPass,
+  escalationWarranted,
+} from '../validator/verdicts.js';
 
 // ---------------------------------------------------------------------------
 // Injection seams
@@ -51,6 +58,15 @@ export interface SupervisorEngine {
   validate(input: ValidatorInput): Promise<ValidatorRunResult>;
   /** Caller count for a symbol not already known to the context, or null. */
   callerCount(symbol: string): number | null;
+  /** Post-patch source of each changed function (bounded), or [] if unavailable. */
+  readChangedSymbolSources?(change: ChangeSummary): { symbol: string; file: string; content: string }[];
+  /** Direct call sites of the changed symbols from context, or [] if unavailable. */
+  callSites?(): { symbol: string; file: string; line?: number; evidence: string }[];
+  /** Full evidence for the one escalation re-run. */
+  escalationEvidence?(change: ChangeSummary): {
+    changedFileContents: { file: string; content: string }[];
+    callerBodies: { symbol: string; file: string; content: string }[];
+  };
 }
 
 export interface SupervisorContext {
@@ -147,7 +163,7 @@ function summarize(
     failedRules?: { ruleId: string; detail: string }[];
     failingTests?: string[];
     regressions?: string[];
-    validatorReasons?: { id: string; verdict: string; reason: string }[];
+    validatorReasons?: { id: string; verdict: string; reason: string; missingEvidence?: string }[];
   }
 ): string {
   const lines = [`Attempt ${attempt} failed (class: ${failureClass}).`];
@@ -163,7 +179,9 @@ function summarize(
   }
   if (detail.validatorReasons && detail.validatorReasons.length > 0) {
     lines.push('Validator verdicts that were not a confident pass:');
-    for (const c of detail.validatorReasons) lines.push(`  - ${c.id}: ${c.verdict} (${c.reason})`);
+    for (const c of detail.validatorReasons) {
+      lines.push(`  - ${c.id}: ${c.verdict} (${c.reason})${c.missingEvidence ? ` [missing: ${c.missingEvidence}]` : ''}`);
+    }
   }
   return lines.join('\n');
 }
@@ -225,10 +243,12 @@ export function writeNeedsHuman(
     '',
     '## Last validator result',
     lastValidator && lastValidator.type === 'validator_result'
-      ? `allCriteriaPass=${lastValidator.allCriteriaPass}; model=${lastValidator.model ?? 'unknown'}`
+      ? `allCriteriaPass=${lastValidator.allCriteriaPass}; judgmentAllPass=${lastValidator.judgmentAllPass ?? 'n/a'}; escalated=${lastValidator.escalated ?? false}; model=${lastValidator.model ?? 'unknown'}`
       : '(no validator result recorded)',
     ...((lastValidator && lastValidator.type === 'validator_result' && lastValidator.criteria
-      ? lastValidator.criteria.map((c) => `- ${c.id}: ${c.verdict} (${c.confidence}) ${c.reason}`)
+      ? lastValidator.criteria.map(
+          (c) => `- ${c.id}: ${c.verdict} (${c.confidence}) ${c.reason}${c.missing_evidence ? ` [missing: ${c.missing_evidence}]` : ''}`
+        )
       : []) as string[]),
     '',
     '## Spend so far',
@@ -239,6 +259,10 @@ export function writeNeedsHuman(
     '',
   ];
   writeArtifact(runDir, 'NEEDS_HUMAN.md', lines.join('\n'));
+}
+
+function mdCell(value: unknown): string {
+  return String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
 export function writeRunReport(
@@ -261,33 +285,98 @@ export function writeRunReport(
     (a, b) => a - b
   );
 
-  const rows: string[] = [
-    '| Attempt | Patch source | Diff hash | Gate | Failed rules | targetPassed | Regressions | Validator |',
+  const rubricFact = facts.find((f) => f.type === 'rubric_created');
+  const rubricCriteria = rubricFact && rubricFact.type === 'rubric_created' ? rubricFact.criteria : [];
+  const checkById = new Map(rubricCriteria.map((c) => [c.id, c.check]));
+  const testCriteria = rubricCriteria.filter((c) => c.check === 'test');
+
+  const summaryRows: string[] = [
+    '| Attempt | Injected | Patch source | Diff hash | Gate | Failed rules | targetPassed | Regressions | Escalated |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  ];
+  const criteriaRows: string[] = [
+    '| Attempt | Criterion | Check | Source | Verdict | Confidence | Reason | Missing evidence |',
     '| --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
+  const escalationNotes: string[] = [];
+
   for (const n of attemptNumbers) {
     const proposed = [...facts].reverse().find((f) => f.type === 'patch_proposed' && f.attempt === n);
     const gate = gateForAttempt(facts, n);
     const tests = testsForAttempt(facts, n);
     const validator = validatorForAttempt(facts, n);
-    const failed = [...facts].reverse().find((f) => f.type === 'attempt_failed' && f.attempt === n);
-    rows.push(
-      [
-        String(n),
-        proposed && proposed.type === 'patch_proposed' ? proposed.patchSource ?? 'model' : 'n/a',
-        proposed && proposed.type === 'patch_proposed' ? proposed.diffHash.slice(0, 12) : 'n/a',
-        gate && gate.type === 'gate_result' ? (gate.passed ? 'pass' : 'FAIL') : 'not run',
-        gate && gate.type === 'gate_result' ? (gate.failedRules.join(', ') || 'none') : '-',
-        tests && tests.type === 'tests_result' ? String(tests.targetPassed ?? 'n/a') : 'not run',
-        tests && tests.type === 'tests_result' ? ((tests.regressions ?? []).join(', ') || 'none') : '-',
-        validator && validator.type === 'validator_result'
-          ? validator.allCriteriaPass
-            ? 'allCriteriaPass'
-            : 'rejected'
-          : 'not run',
-      ].join(' | ')
+    const codeFacts = [...facts].reverse().find((f) => f.type === 'code_verdicts' && f.attempt === n);
+    const escalated = [...facts].reverse().find((f) => f.type === 'validator_escalated' && f.attempt === n);
+    const injected = n === 1 && opts.injected ? 'YES' : 'no';
+
+    summaryRows.push(
+      '| ' +
+        [
+          String(n),
+          injected,
+          proposed && proposed.type === 'patch_proposed' ? proposed.patchSource ?? 'model' : 'n/a',
+          proposed && proposed.type === 'patch_proposed' ? proposed.diffHash.slice(0, 12) : 'n/a',
+          gate && gate.type === 'gate_result' ? (gate.passed ? 'pass' : 'FAIL') : 'not run',
+          gate && gate.type === 'gate_result' ? (gate.failedRules.join(', ') || 'none') : '-',
+          tests && tests.type === 'tests_result' ? String(tests.targetPassed ?? 'n/a') : 'not run',
+          tests && tests.type === 'tests_result' ? ((tests.regressions ?? []).join(', ') || 'none') : '-',
+          escalated ? 'YES' : 'no',
+        ].join(' | ') +
+        ' |'
     );
-    void failed;
+
+    const codeVerdicts = codeFacts && codeFacts.type === 'code_verdicts' ? codeFacts.verdicts : [];
+    const codePass = codeVerdicts.length > 0 && codeVerdicts.every((v) => v.verdict === 'pass');
+
+    // Code-decided criteria (source: code).
+    for (const v of codeVerdicts) {
+      criteriaRows.push(
+        '| ' +
+          [String(n), mdCell(v.id), 'code', 'code', v.verdict, String(v.confidence), mdCell(v.reason), ''].join(' | ') +
+          ' |'
+      );
+    }
+    // Rubric criteria with check "test" are covered by the code verdicts.
+    for (const c of testCriteria) {
+      criteriaRows.push(
+        '| ' +
+          [
+            String(n),
+            mdCell(c.id),
+            'test',
+            'code',
+            codePass ? 'pass' : 'fail',
+            '1',
+            'covered by code verdicts (repro test, no regressions, policy gate)',
+            '',
+          ].join(' | ') +
+          ' |'
+      );
+    }
+    // Validator judgment criteria (source: validator).
+    if (validator && validator.type === 'validator_result' && validator.criteria) {
+      for (const c of validator.criteria) {
+        criteriaRows.push(
+          '| ' +
+            [
+              String(n),
+              mdCell(c.id),
+              mdCell(checkById.get(c.id) ?? '?'),
+              'validator',
+              c.verdict,
+              String(c.confidence),
+              mdCell(c.reason),
+              mdCell(c.missing_evidence ?? ''),
+            ].join(' | ') +
+            ' |'
+        );
+      }
+    }
+    if (escalated && escalated.type === 'validator_escalated') {
+      escalationNotes.push(
+        `Attempt ${n}: validator was unclear on ${escalated.unclearIds.join(', ')}; one evidence escalation re-ran the validator.`
+      );
+    }
   }
 
   const lines = [
@@ -302,7 +391,15 @@ export function writeRunReport(
     '',
     '## Per-attempt results',
     '',
-    ...rows,
+    ...summaryRows,
+    '',
+    '## Per-criterion verdicts (source: code or validator)',
+    '',
+    ...criteriaRows,
+    '',
+    '## Escalation',
+    '',
+    escalationNotes.length > 0 ? escalationNotes.join('\n') : '(no evidence escalation was needed)',
     '',
     '## Failure memory used',
     '',
@@ -616,65 +713,147 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
           return 'tests_failed' as const;
         }
 
-        // ----- Independent validator (only when the tests passed) -----
-        const validatorInput: ValidatorInput = {
-          criteria: rubric?.criteria ?? [],
-          diff,
+        // ----- Code-decided verdicts (item 1): plain code decides these -----
+        const codeVerdicts = buildCodeVerdicts({
+          issueId,
           targetPassed,
           regressions,
-          gate: { passed: gate.passed, failedRules: gate.failedRules, rules: gate.rules },
-          evidenceText: context.evidenceText,
-        };
-
-        let validatorResult: ValidatorRunResult;
-        try {
-          validatorResult = await retryTransient(attempt, () => engine.validate(validatorInput));
-        } catch (err) {
-          if (err instanceof ValidatorError) {
-            log(`Validator output invalid after retry: ${err.reason}`);
-            emit({ type: 'attempt_failed', attempt, failureClass: 'rejected_validator' });
-            setOutcome('needs_human');
-            return 'needs_human_invalid' as const;
-          }
-          emit({ type: 'attempt_failed', attempt, failureClass: 'no_evidence' });
-          memory.push(
-            summarize(attempt, 'no_evidence', { failingTests: [] }) +
-              `\nValidator call error: ${err instanceof Error ? err.message : String(err)}`
-          );
-          setOutcome('no_evidence');
-          return 'no_evidence' as const;
-        }
-
-        emit({
-          type: 'validator_result',
-          attempt,
-          allCriteriaPass: validatorResult.allCriteriaPass,
-          model: validatorResult.model,
-          criteria: validatorResult.criteria,
+          gatePassed: gate.passed,
         });
-        writeArtifact(
-          runDir,
-          `validator-${attempt}.json`,
-          JSON.stringify(
-            {
-              attempt,
-              model: validatorResult.model,
-              minConfidence: policy.validatorMinConfidence,
-              allCriteriaPass: validatorResult.allCriteriaPass,
-              criteria: validatorResult.criteria,
-            },
-            null,
-            2
-          ) + '\n'
-        );
+        emit({ type: 'code_verdicts', attempt, verdicts: codeVerdicts });
 
-        if (!validatorResult.allCriteriaPass) {
+        const { judgment } = partitionRubric(rubric?.criteria ?? []);
+        const judgmentIds = judgment.map((c) => c.id);
+
+        // ----- Independent validator (judgment criteria only) -----
+        let validatorResult: ValidatorRunResult | undefined;
+        if (judgmentIds.length > 0) {
+          const validatorInput: ValidatorInput = {
+            criteria: judgment,
+            diff,
+            targetPassed,
+            regressions,
+            gate: { passed: gate.passed, failedRules: gate.failedRules, rules: gate.rules },
+            evidenceText: context.evidenceText,
+            changedSources: engine.readChangedSymbolSources ? engine.readChangedSymbolSources(change) : [],
+            passedTests: testRes.passingTests,
+            failedTests: testRes.failingTests,
+            testsExercisingSymbols: [],
+            testsExercisingNote: 'the structural graph does not supply a test-to-symbol mapping',
+            callSites: engine.callSites ? engine.callSites() : [],
+          };
+
+          try {
+            validatorResult = await retryTransient(attempt, () => engine.validate(validatorInput));
+          } catch (err) {
+            if (err instanceof ValidatorError) {
+              log(`Validator output invalid after retry: ${err.reason}`);
+              emit({ type: 'attempt_failed', attempt, failureClass: 'rejected_validator' });
+              setOutcome('needs_human');
+              return 'needs_human_invalid' as const;
+            }
+            emit({ type: 'attempt_failed', attempt, failureClass: 'no_evidence' });
+            memory.push(
+              summarize(attempt, 'no_evidence', { failingTests: [] }) +
+                `\nValidator call error: ${err instanceof Error ? err.message : String(err)}`
+            );
+            setOutcome('no_evidence');
+            return 'no_evidence' as const;
+          }
+
+          // ----- Item 4: ONE evidence escalation when only unclear verdicts block -----
+          if (policy.validatorEscalation) {
+            const decision = escalationWarranted(
+              codeVerdicts,
+              validatorResult.criteria,
+              judgmentIds,
+              policy.validatorMinConfidence
+            );
+            if (decision.escalate) {
+              emit({ type: 'validator_escalated', attempt, unclearIds: decision.unclearIds });
+              writeArtifact(
+                runDir,
+                `validator-${attempt}-pre-escalation.json`,
+                JSON.stringify(
+                  {
+                    attempt,
+                    model: validatorResult.model,
+                    escalated: false,
+                    allCriteriaPass: validatorResult.allCriteriaPass,
+                    criteria: validatorResult.criteria,
+                  },
+                  null,
+                  2
+                ) + '\n'
+              );
+              const escalation = engine.escalationEvidence
+                ? engine.escalationEvidence(change)
+                : { changedFileContents: [], callerBodies: [] };
+              log(
+                `Attempt ${attempt}: validator unclear on ${decision.unclearIds.join(', ')}; escalating evidence once.`
+              );
+              validatorResult = await retryTransient(attempt, () =>
+                engine.validate({ ...validatorInput, escalation })
+              );
+            }
+          }
+
+          const combined = combineAllCriteriaPass(
+            codeVerdicts,
+            validatorResult.criteria,
+            judgmentIds,
+            policy.validatorMinConfidence
+          );
+          emit({
+            type: 'validator_result',
+            attempt,
+            allCriteriaPass: combined,
+            judgmentAllPass: validatorResult.allCriteriaPass,
+            model: validatorResult.model,
+            escalated: validatorResult.escalated,
+            criteria: validatorResult.criteria,
+          });
+          writeArtifact(
+            runDir,
+            `validator-${attempt}.json`,
+            JSON.stringify(
+              {
+                attempt,
+                model: validatorResult.model,
+                minConfidence: policy.validatorMinConfidence,
+                escalated: validatorResult.escalated,
+                allCriteriaPass: combined,
+                judgmentAllPass: validatorResult.allCriteriaPass,
+                criteria: validatorResult.criteria,
+              },
+              null,
+              2
+            ) + '\n'
+          );
+
+          if (!combined) {
+            emit({ type: 'attempt_failed', attempt, failureClass: 'rejected_validator' });
+            memory.push(
+              summarize(attempt, 'rejected_validator', {
+                validatorReasons: validatorResult.criteria
+                  .filter((c) => c.verdict !== 'pass' || c.confidence < policy.validatorMinConfidence)
+                  .map((c) => ({ id: c.id, verdict: c.verdict, reason: c.reason, missingEvidence: c.missing_evidence })),
+              }) +
+                (validatorResult.escalated
+                  ? '\n(one evidence escalation was attempted and the verdict was still not a confident pass)'
+                  : '')
+            );
+            setOutcome('rejected_validator');
+            return 'rejected_validator' as const;
+          }
+        } else if (!allCodePass(codeVerdicts)) {
+          // No judgment criteria: the code verdicts alone decide (fail closed).
           emit({ type: 'attempt_failed', attempt, failureClass: 'rejected_validator' });
           memory.push(
             summarize(attempt, 'rejected_validator', {
-              validatorReasons: validatorResult.criteria
-                .filter((c) => c.verdict !== 'pass' || c.confidence < policy.validatorMinConfidence)
-                .map((c) => ({ id: c.id, verdict: c.verdict, reason: c.reason })),
+              validatorReasons: codeVerdicts
+                .filter((v) => v.verdict !== 'pass')
+                .map((v) => ({ id: v.id, verdict: v.verdict, reason: v.reason })),
             })
           );
           setOutcome('rejected_validator');

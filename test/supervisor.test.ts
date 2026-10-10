@@ -26,6 +26,7 @@ const POLICY: Policy = {
   maxTransitiveCallers: 10,
   maxAttempts: 3,
   validatorMinConfidence: 0.7,
+  validatorEscalation: true,
   maxTokensPerRun: 60000,
   maxWallSeconds: 300,
   lockfiles: ['package.json'],
@@ -35,7 +36,10 @@ const POLICY: Policy = {
 const RUBRIC: RubricResult = {
   model: 'claude-haiku',
   attempts: 1,
-  criteria: [{ id: 'r1', text: 'the rounded total is correct', check: 'test' }],
+  criteria: [
+    { id: 'r0', text: 'the repro test passes', check: 'test' },
+    { id: 'r1', text: 'the rounded total is correct', check: 'diff' },
+  ],
 };
 
 const CHANGE: ChangeSummary = {
@@ -62,7 +66,8 @@ function okValidator(): ValidatorRunResult {
   return {
     model: 'nova-pro',
     attempts: 1,
-    criteria: [{ id: 'r1', verdict: 'pass', confidence: 0.9, reason: 'looks correct' }],
+    escalated: false,
+    criteria: [{ id: 'r1', verdict: 'pass', confidence: 0.9, reason: 'looks correct', missing_evidence: '' }],
     allCriteriaPass: true,
   };
 }
@@ -177,7 +182,8 @@ describe('supervisor attempt loop', () => {
         return {
           model: 'nova-pro',
           attempts: 1,
-          criteria: [{ id: 'r1', verdict: 'fail', confidence: 0.95, reason: 'wrong rounding' }],
+          escalated: false,
+          criteria: [{ id: 'r1', verdict: 'fail', confidence: 0.95, reason: 'wrong rounding', missing_evidence: '' }],
           allCriteriaPass: false,
         };
       },
@@ -273,7 +279,8 @@ describe('supervisor attempt loop', () => {
           return {
             model: 'nova-pro',
             attempts: 1,
-            criteria: [{ id: 'r1', verdict: 'pass', confidence: 0.4, reason: 'unsure' }],
+            escalated: false,
+            criteria: [{ id: 'r1', verdict: 'pass', confidence: 0.4, reason: 'unsure', missing_evidence: '' }],
             allCriteriaPass: false,
           };
         }
@@ -287,5 +294,67 @@ describe('supervisor attempt loop', () => {
     const facts = h.facts();
     assert.ok(facts.some((f) => f.type === 'attempt_failed' && f.failureClass === 'rejected_validator'));
     assert.ok(fs.existsSync(path.join(h.runDir, 'proposed.patch')));
+  });
+
+  it('escalates evidence exactly once when only an unclear verdict blocks, then ships', async () => {
+    let validateCalls = 0;
+    let commitCount = 0;
+    const h = makeHarness({
+      commit: () => `sha-${++commitCount}`,
+      diff: (_b, head) => `diff-${head}`,
+      validate: async (input) => {
+        validateCalls++;
+        if (!input.escalation) {
+          return {
+            model: 'nova-pro',
+            attempts: 1,
+            escalated: false,
+            criteria: [{ id: 'r1', verdict: 'unclear', confidence: 0.5, reason: 'cannot tell', missing_evidence: 'need the caller' }],
+            allCriteriaPass: false,
+          };
+        }
+        return {
+          model: 'nova-pro',
+          attempts: 1,
+          escalated: true,
+          criteria: [{ id: 'r1', verdict: 'pass', confidence: 0.95, reason: 'now clear', missing_evidence: '' }],
+          allCriteriaPass: true,
+        };
+      },
+    });
+
+    const outcome = await runSupervisor(h.options());
+    assert.equal(outcome.shipped, true);
+    assert.equal(validateCalls, 2);
+    const facts = h.facts();
+    assert.equal(facts.filter((f) => f.type === 'validator_escalated').length, 1);
+    assert.equal(deriveStatus(facts), 'shipped');
+  });
+
+  it('a still-unclear verdict after escalation is rejected_validator', async () => {
+    let validateCalls = 0;
+    let commitCount = 0;
+    const h = makeHarness({
+      commit: () => `sha-${++commitCount}`,
+      diff: (_b, head) => `diff-${head}`,
+      validate: async (input) => {
+        validateCalls++;
+        return {
+          model: 'nova-pro',
+          attempts: 1,
+          escalated: Boolean(input.escalation),
+          criteria: [{ id: 'r1', verdict: 'unclear', confidence: 0.5, reason: 'still cannot tell', missing_evidence: 'still missing' }],
+          allCriteriaPass: false,
+        };
+      },
+    });
+
+    const outcome = await runSupervisor(h.options());
+    assert.equal(outcome.shipped, false);
+    const facts = h.facts();
+    assert.equal(facts.filter((f) => f.type === 'validator_escalated').length, 3);
+    assert.equal(validateCalls, 6);
+    assert.ok(facts.some((f) => f.type === 'needs_human'));
+    assert.equal(deriveStatus(facts), 'needs_human');
   });
 });

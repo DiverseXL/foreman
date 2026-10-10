@@ -34,6 +34,16 @@ export type FactPayload =
       findingCount?: number;
       indexedSymbols?: number;
     }
+  | {
+      type: 'rubric_created';
+      model?: string;
+      criteria: { id: string; text: string; check: string }[];
+    }
+  | {
+      type: 'code_verdicts';
+      attempt: number;
+      verdicts: { id: string; criterion: string; source: string; verdict: string; confidence: number; reason: string }[];
+    }
   | { type: 'patch_proposed'; attempt: number; diffHash: string; patchSource?: PatchSource }
   | { type: 'gate_result'; attempt: number; passed: boolean; failedRules: string[] }
   | {
@@ -50,11 +60,28 @@ export type FactPayload =
   | {
       type: 'validator_result';
       attempt: number;
+      /** combined: code verdicts pass AND every judgment criterion is a confident pass */
       allCriteriaPass: boolean;
+      /** the validator's own judgment-group result, before combining with code */
+      judgmentAllPass?: boolean;
       /** validator model name */
       model?: string;
+      /** true when this result came from the one evidence-escalation re-run */
+      escalated?: boolean;
       /** per-criterion verdicts */
-      criteria?: { id: string; verdict: string; confidence: number; reason: string }[];
+      criteria?: {
+        id: string;
+        verdict: string;
+        confidence: number;
+        reason: string;
+        missing_evidence?: string;
+      }[];
+    }
+  | {
+      type: 'validator_escalated';
+      attempt: number;
+      /** rubric ids that were unclear and triggered the escalation */
+      unclearIds: string[];
     }
   | { type: 'attempt_failed'; attempt: number; failureClass: AttemptFailureClass }
   | {

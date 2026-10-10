@@ -68,8 +68,8 @@ export interface ModelCallCosts {
 // ---------------------------------------------------------------------------
 
 export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 4000;
-// Step-7 budget: at most 120000 total tokens across the step's runs.
-export const STEP_MAX_TOTAL_TOKENS = 120000;
+// Step-8 budget: at most 150000 total tokens across the step's runs.
+export const STEP_MAX_TOTAL_TOKENS = 150000;
 export const STEP_MAX_PATCH_ATTEMPTS = 1;
 
 /** Safety reserve, in USD, kept below the gateway key's max budget. */

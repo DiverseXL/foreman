@@ -167,6 +167,46 @@ export function buildSourceBundle(
   return snippets;
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Extracts a symbol's body from file content by brace matching, bounded to
+ * maxLines. Used to give the validator the post-patch source of changed functions.
+ * A heuristic (strings/comments with braces could miscount) that is deliberately
+ * bounded and fail-soft: it returns '' when the symbol cannot be located.
+ */
+export function extractSymbolBody(content: string, name: string, maxLines = 80): string {
+  const lines = content.split(/\r?\n/);
+  const decl = new RegExp(`(function|const|let|var|class|interface|type)\\s+${escapeRegExp(name)}\\b|\\b${escapeRegExp(name)}\\s*[(=:]`);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (decl.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return '';
+
+  const out: string[] = [];
+  let depth = 0;
+  let opened = false;
+  for (let i = start; i < lines.length && out.length < maxLines; i++) {
+    out.push(lines[i]);
+    for (const ch of lines[i]) {
+      if (ch === '{') {
+        depth++;
+        opened = true;
+      } else if (ch === '}') {
+        depth--;
+      }
+    }
+    if (opened && depth <= 0) break;
+  }
+  return out.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Proposal
 // ---------------------------------------------------------------------------

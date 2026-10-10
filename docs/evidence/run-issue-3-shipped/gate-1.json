@@ -1,0 +1,61 @@
+{
+  "attempt": 1,
+  "passed": false,
+  "failedRules": [
+    "blast_radius"
+  ],
+  "changedSymbolMethod": "entire_graph_diff",
+  "changedSymbolNote": "changed symbols from entire graph diff --json",
+  "changedFiles": [
+    {
+      "path": "src/rounding.ts",
+      "status": "M",
+      "added": 1,
+      "removed": 1
+    }
+  ],
+  "changedSymbols": [
+    {
+      "name": "roundCurrency",
+      "kind": "function",
+      "file": "src/rounding.ts"
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": "path_scope",
+      "passed": true,
+      "detail": "all 1 changed file(s) within src/**"
+    },
+    {
+      "ruleId": "tests_protected",
+      "passed": true,
+      "detail": "no file under test/ was added, deleted, renamed or modified"
+    },
+    {
+      "ruleId": "diff_size",
+      "passed": true,
+      "detail": "files=1/3 changedLines=2/40"
+    },
+    {
+      "ruleId": "dependencies",
+      "passed": true,
+      "detail": "no lockfile changes and no added external imports"
+    },
+    {
+      "ruleId": "secrets",
+      "passed": true,
+      "detail": "no key-like patterns in added lines"
+    },
+    {
+      "ruleId": "evidence_scope",
+      "passed": true,
+      "detail": "every changed symbol appears in context.json"
+    },
+    {
+      "ruleId": "blast_radius",
+      "passed": false,
+      "detail": "changed symbol(s) over 10 callers: roundCurrency=19"
+    }
+  ]
+}

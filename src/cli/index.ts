@@ -19,6 +19,7 @@ import {
   proposePatch,
   applyEdits,
   buildSourceBundle,
+  extractSymbolBody,
   validateEditsPayload,
   type PatchEdit,
 } from '../patch/propose.js';
@@ -247,6 +248,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       });
 
       if (rubricResult) {
+        appendFact(runId, {
+          type: 'rubric_created',
+          model: rubricResult.model,
+          criteria: rubricResult.criteria.map((c) => ({ id: c.id, text: c.text, check: c.check })),
+        });
+        fs.writeFileSync(path.join(runDir, 'rubric.json'), JSON.stringify(rubricResult, null, 2) + '\n', 'utf-8');
+      }
+
+      if (rubricResult) {
         const sources = buildSourceBundle(contextBundle, workspace.path);
         const policy = loadPolicy();
 
@@ -309,6 +319,41 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
               { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.validator.model': validatorModel() }
             ),
           callerCount: (symbol) => callerCountFor(workspace.path, symbol),
+          readChangedSymbolSources: (change) =>
+            change.changedSymbols.map((s) => {
+              const full = path.resolve(workspace.path, s.file);
+              const root = path.resolve(workspace.path);
+              if (!full.startsWith(root) || !fs.existsSync(full)) return { symbol: s.name, file: s.file, content: '' };
+              const content = fs.readFileSync(full, 'utf-8');
+              return { symbol: s.name, file: s.file, content: extractSymbolBody(content, s.name, 80) };
+            }),
+          callSites: () =>
+            contextBundle.findings
+              .filter((f) => f.callSiteFile !== undefined && f.callSiteLine !== undefined)
+              .slice(0, 40)
+              .map((f) => ({
+                symbol: f.symbol,
+                file: f.callSiteFile as string,
+                line: f.callSiteLine,
+                evidence: f.evidence,
+              })),
+          escalationEvidence: (change) => {
+            const root = path.resolve(workspace.path);
+            const read = (rel: string): string => {
+              const full = path.resolve(workspace.path, rel);
+              return full.startsWith(root) && fs.existsSync(full) ? fs.readFileSync(full, 'utf-8') : '';
+            };
+            const changedFileContents = change.changedFiles.map((cf) => ({ file: cf.path, content: read(cf.path) }));
+            const callerFindings = contextBundle.findings
+              .filter((f) => f.callSiteFile !== undefined && f.callSiteLine !== undefined)
+              .slice(0, 10);
+            const callerBodies = callerFindings.map((f) => ({
+              symbol: f.symbol,
+              file: f.file,
+              content: extractSymbolBody(read(f.file), f.symbol, 120),
+            }));
+            return { changedFileContents, callerBodies };
+          },
         };
 
         const instrument: SupervisorInstrument = {
