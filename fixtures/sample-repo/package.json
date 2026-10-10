@@ -1,0 +1,12 @@
+{
+  "name": "sample-repo",
+  "version": "1.0.0",
+  "description": "Synthetic shopping cart pricing library with seeded benchmark issues",
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}
