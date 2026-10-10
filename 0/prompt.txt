@@ -1,0 +1,43 @@
+STEP 4 of the Foreman build. Do only this step, then stop and wait.
+
+FIRST ACTION: run and report verbatim Get-Location, git rev-parse --show-toplevel, entire status, entire session list. If there is no active Entire session, say so clearly, then CONTINUE. Do not try to fix Entire.
+
+Context: Step 3 delivered setup-only runs (workspace copy, baseline tests, append-only facts, deriveStatus, neatlogs). Step 4 adds mandate + structural context only. NO model calls, NO patches, NO policy gate on diffs, NO PR.
+
+Rules:
+- No emojis. PowerShell-compatible commands. No model or LLM API calls. Network only for neatlogs export if already configured.
+- Never git commit or git push in the Foreman repo. Stage with git add only, then print a proposed commit message. Git inside runs/<runId>/repo is allowed.
+- Never use --no-verify, change hooks, or kill processes. If something hangs more than 30 seconds, stop and report.
+- Never print or read .env or any secret value. Runtime may use process.loadEnvFile.
+- Do not guess CLI flags or JSON shapes. For Entire graph, run entire graph --help and entire graph capabilities --json (or equivalent documented commands) in this environment and only use flags that appear in real output. For neatlogs, quote declarations from node_modules/neatlogs/dist/index.d.ts you rely on.
+- Use real timestamps. Flag placeholders before writing them. In the final report list as FAILED anything retried or worked around.
+
+Build:
+1. src/mandate/load.ts (or equivalent): read issues/issue-<n>.md from the Foreman repo root. Parse into a structured Mandate object: issueId, title, summary, acceptanceCriteria string[], hintedPaths string[], hintedSymbols string[]. Prefer simple deterministic parsing (headings/bullets) over an LLM. If a field is missing, use empty array or explicit null and document it. Append fact mandate_created with a safe summary (no huge blobs; store path or short hash if needed).
+
+2. src/context/graph.ts: given the run workspace path (runs/<runId>/repo), gather structural context using Entire graph commands that actually work here (e.g. index if needed, search, impact, def, neighbors). Use mandate hintedSymbols/hintedPaths as queries when present; otherwise derive simple queries from acceptance criteria keywords carefully without inventing symbols. Produce a ContextBundle: queriesRun[], findings[] (symbol, kind, file, snippet or path evidence from command output), and a short notes string. Re-index the run copy if required and show evidence. Append fact context_built with counts (e.g. findingCount, queryCount), not full raw dumps.
+
+3. Wire into CLI: extend foreman run --issue <n> so that after setup (workspace + baseline), it loads mandate and builds context unless a flag skips them. Prefer:
+   - default or --through context : setup + mandate + context
+   - --setup-only : keep Step 3 behavior only
+   Print mandate summary and context summary; print deriveStatus; flush/shutdown neatlogs.
+   Add stage spans: mandate_load, graph_context (kinds allowed by neatlogs SpanKind).
+
+4. Unit tests (node:test): mandate parser against the three real issue markdown files (or fixtures copied from them); deriveStatus still passes; optional small test that mandate_created/context_built fact shapes append cleanly.
+
+5. Dated hackathon.md Build log entry for Step 4. Stage everything (git add). Do not commit.
+
+Verification with real output:
+(a) npm test
+(b) npm run foreman -- run --issue 1 --setup-only  (unchanged baseline behavior)
+(c) npm run foreman -- run --issue 1   (or --through context) full console output
+(d) facts.jsonl for that run showing run_started, workspace_created, baseline_recorded, mandate_created, context_built
+(e) baseline still 28 passed / 3 failed with the three repro names
+(f) neatlogs trace id; confirm new spans exist in the report (dashboard check is for the human)
+(g) Show the exact entire graph commands and trimmed real output used for context
+(h) git status; git diff --cached --stat; git check-ignore runs; no secrets in staged files
+List UNVERIFIED / FAILED items. Proposed commit message only. Stop and wait.
+
+---
+
+continue
