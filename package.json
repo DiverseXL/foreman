@@ -4,6 +4,8 @@
   "description": "TypeScript CLI agent for automated issue evaluation and repair",
   "type": "module",
   "scripts": {
+    "foreman": "tsx src/cli/index.ts",
+    "test": "tsx --test test/**/*.test.ts",
     "smoke:neatlogs": "tsx scripts/smoke-neatlogs.ts"
   },
   "keywords": [],
