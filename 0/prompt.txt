@@ -1,0 +1,6 @@
+- The shell's working directory must remain the Foreman repo root for the whole step. Never cd into runs/. Run git inside a run copy only with git -C <path> or a subprocess cwd option.
+- Right after the first-action report, and again as the last thing before stopping, run entire status and entire session list and report whether the session shows as active and whether tracking is diverged.
+
+---
+
+continue
