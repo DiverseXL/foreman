@@ -7,6 +7,21 @@ export interface WorkspaceOptions {
   runsDir?: string;
 }
 
+/**
+ * Returns the run copy's diff versus its baseline commit, as a string.
+ * Stages tracked+untracked changes first so new files are included. Safe: this
+ * only touches the isolated run copy, never the Foreman repository.
+ */
+export function gitDiff(repoPath: string): string {
+  execSync('git add -A', { cwd: repoPath, stdio: 'pipe' });
+  return execSync('git diff --cached --no-color --no-ext-diff', {
+    cwd: repoPath,
+    stdio: 'pipe',
+  })
+    .toString('utf-8')
+    .trim();
+}
+
 export interface WorkspaceResult {
   baseCommit: string;
   branch: string;

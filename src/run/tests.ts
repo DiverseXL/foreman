@@ -6,6 +6,8 @@ export interface TestRunResult {
   failed: number;
   failingTests: string[];
   durationMs: number;
+  /** Raw combined stdout/stderr of the test command. */
+  output: string;
 }
 
 /**
@@ -13,6 +15,7 @@ export interface TestRunResult {
  * and TAP format). Reporter format verified via direct inspection of node:test in target repo.
  */
 export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
+  const raw = output;
   let passed = 0;
   let failed = 0;
   let durationMs = 0;
@@ -65,6 +68,7 @@ export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
     failed,
     failingTests,
     durationMs,
+    output: raw,
   };
 }
 

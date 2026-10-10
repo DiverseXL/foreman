@@ -6,6 +6,10 @@ export interface ContextFinding {
   kind: string;
   file: string;
   evidence: string;
+  startLine?: number;
+  endLine?: number;
+  callSiteFile?: string;
+  callSiteLine?: number;
 }
 
 export interface IndexSummary {
@@ -16,52 +20,88 @@ export interface IndexSummary {
   completeness: string;
 }
 
+/** Per-symbol caller/callee counts derived from `entire graph impact`. */
+export interface SymbolFact {
+  symbol: string;
+  file?: string;
+  startLine?: number;
+  endLine?: number;
+  callerCount: number;
+  calleeCount: number;
+}
+
+/** Raw JSON output of one `entire graph` invocation, persisted under graph-raw/. */
+export interface RawGraphCommand {
+  args: string[];
+  stdout: string;
+}
+
 export interface ContextBundle {
   queriesRun: string[];
   findings: ContextFinding[];
+  symbolFacts: SymbolFact[];
   notes: string;
   indexSummary?: IndexSummary;
 }
 
-function runEntireGraphCommand(args: string[]): { success: boolean; data?: any; error?: string } {
+export interface ContextResult {
+  bundle: ContextBundle;
+  rawCommands: RawGraphCommand[];
+}
+
+interface GraphCommandResult {
+  success: boolean;
+  data?: any;
+  raw: string;
+  error?: string;
+}
+
+function runEntireGraphCommand(args: string[]): GraphCommandResult {
   const result = spawnSync('entire', ['graph', ...args], {
     encoding: 'utf-8',
     timeout: 30000,
   });
 
+  const raw = result.stdout ? result.stdout.trim() : '';
+
   if (result.error) {
-    return { success: false, error: result.error.message };
+    return { success: false, raw, error: result.error.message };
   }
 
-  const stdout = result.stdout ? result.stdout.trim() : '';
   if (result.status !== 0) {
     const stderr = result.stderr ? result.stderr.trim() : '';
-    return { success: false, error: stderr || `Exit code ${result.status}` };
+    return { success: false, raw, error: stderr || `Exit code ${result.status}` };
   }
 
   try {
-    const data = JSON.parse(stdout);
-    return { success: true, data };
+    return { success: true, data: JSON.parse(raw), raw };
   } catch {
-    return { success: true, data: stdout };
+    return { success: true, data: raw, raw };
   }
 }
 
 /**
  * Gathers structural code context from the target workspace using Entire graph
- * commands (index, def, impact, search).
- *
- * Re-indexes the copy to warm committed-tree relations and parses machine-readable
- * NDJSON/JSON outputs without model calls.
+ * commands (index, def, impact, search). Re-indexes the copy to warm committed-tree
+ * relations, parses machine-readable JSON, and retains the raw output of every
+ * command so it can be persisted under graph-raw/.
  */
-export function buildContext(repoPath: string, mandate: Mandate): ContextBundle {
+export function buildContext(repoPath: string, mandate: Mandate): ContextResult {
   const queriesRun: string[] = [];
   const findings: ContextFinding[] = [];
+  const symbolFacts: SymbolFact[] = [];
+  const rawCommands: RawGraphCommand[] = [];
   const notesList: string[] = [];
   let indexSummary: IndexSummary | undefined;
 
+  const run = (args: string[]): GraphCommandResult => {
+    const res = runEntireGraphCommand(args);
+    rawCommands.push({ args, stdout: res.raw });
+    return res;
+  };
+
   // 1. Re-index run copy to build/warm graph relations
-  const indexRes = runEntireGraphCommand(['index', '--repo', repoPath, '--format', 'json']);
+  const indexRes = run(['index', '--repo', repoPath, '--format', 'json']);
   if (indexRes.success && indexRes.data && typeof indexRes.data === 'object') {
     const counts = indexRes.data.counts;
     if (counts) {
@@ -82,125 +122,109 @@ export function buildContext(repoPath: string, mandate: Mandate): ContextBundle 
 
   // 2. Query definitions, impact, and search for hinted symbols
   for (const symbol of mandate.hintedSymbols) {
-    // Structural declaration lookup
-    const defQuery = `def ${symbol}`;
-    queriesRun.push(defQuery);
-    const defRes = runEntireGraphCommand(['def', symbol, '--repo', repoPath, '--format', 'json']);
-    if (defRes.success && defRes.data?.declarations) {
-      for (const decl of defRes.data.declarations) {
-        findings.push({
-          symbol: decl.name,
-          kind: decl.kind || 'declaration',
-          file: decl.file_path,
-          evidence: decl.signature || `${decl.file_path}:${decl.start_line}-${decl.end_line}`,
-        });
-      }
+    const defRes = run(['def', symbol, '--repo', repoPath, '--format', 'json']);
+    queriesRun.push(`def ${symbol}`);
+    const declarations: any[] = defRes.success && Array.isArray(defRes.data?.declarations) ? defRes.data.declarations : [];
+    for (const decl of declarations) {
+      findings.push({
+        symbol: decl.name,
+        kind: decl.kind || 'declaration',
+        file: decl.file_path,
+        evidence: decl.signature || `${decl.file_path}:${decl.start_line}-${decl.end_line}`,
+        startLine: decl.start_line,
+        endLine: decl.end_line,
+      });
     }
 
-    // Blast radius and caller/callee traversal
-    const impactQuery = `impact ${symbol}`;
-    queriesRun.push(impactQuery);
-    const impactRes = runEntireGraphCommand([
-      'impact',
-      '--symbol',
-      symbol,
-      '--repo',
-      repoPath,
-      '--format',
-      'json',
-    ]);
+    const impactRes = run(['impact', '--symbol', symbol, '--repo', repoPath, '--format', 'json']);
+    queriesRun.push(`impact ${symbol}`);
     if (impactRes.success && impactRes.data) {
       const data = impactRes.data;
-      if (data.callers?.entries) {
-        for (const caller of data.callers.entries) {
-          if (caller.endpoint) {
-            findings.push({
-              symbol: caller.endpoint.name,
-              kind: caller.endpoint.kind || 'caller',
-              file: caller.endpoint.file_path,
-              evidence: `Caller (${caller.relation}) at ${caller.call_site?.file_path || caller.endpoint.file_path}:${caller.call_site?.line || caller.endpoint.start_line || ''}`,
-            });
-          }
-        }
+      const callers: any[] = data.callers?.entries ?? [];
+      const callees: any[] = data.callees?.entries ?? [];
+
+      for (const decl of declarations) {
+        symbolFacts.push({
+          symbol: decl.name,
+          file: decl.file_path,
+          startLine: decl.start_line,
+          endLine: decl.end_line,
+          callerCount: data.callers?.total ?? callers.length,
+          calleeCount: data.callees?.total ?? callees.length,
+        });
       }
-      if (data.callees?.entries) {
-        for (const callee of data.callees.entries) {
-          if (callee.endpoint) {
-            findings.push({
-              symbol: callee.endpoint.name,
-              kind: callee.endpoint.kind || 'callee',
-              file: callee.endpoint.file_path,
-              evidence: `Callee (${callee.relation})`,
-            });
-          }
-        }
+
+      for (const caller of callers) {
+        if (!caller.endpoint) continue;
+        findings.push({
+          symbol: caller.endpoint.name,
+          kind: caller.endpoint.kind || 'caller',
+          file: caller.endpoint.file_path,
+          evidence: `Caller (${caller.relation}) at ${caller.call_site?.file_path || caller.endpoint.file_path}:${caller.call_site?.line || caller.endpoint.start_line || ''}`,
+          callSiteFile: caller.call_site?.file_path,
+          callSiteLine: caller.call_site?.line,
+        });
+      }
+      for (const callee of callees) {
+        if (!callee.endpoint) continue;
+        findings.push({
+          symbol: callee.endpoint.name,
+          kind: callee.endpoint.kind || 'callee',
+          file: callee.endpoint.file_path,
+          evidence: `Callee (${callee.relation})`,
+          startLine: callee.endpoint.start_line,
+          endLine: callee.endpoint.end_line,
+        });
       }
     }
 
-    // Graph search query
-    const searchQuery = `search ${symbol}`;
-    queriesRun.push(searchQuery);
-    const searchRes = runEntireGraphCommand([
-      'search',
-      '--repo',
-      repoPath,
-      '--query',
-      symbol,
-      '--format',
-      'json',
-    ]);
-    if (searchRes.success && searchRes.data?.candidates) {
-      for (const cand of searchRes.data.candidates.slice(0, 5)) {
-        findings.push({
-          symbol: cand.symbol_name || cand.qualified_name || symbol,
-          kind: cand.kind || 'code_search',
-          file: cand.file_path,
-          evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
-        });
-      }
+    const searchRes = run(['search', '--repo', repoPath, '--query', symbol, '--format', 'json']);
+    queriesRun.push(`search ${symbol}`);
+    const results: any[] = searchRes.success && Array.isArray(searchRes.data?.results) ? searchRes.data.results : [];
+    for (const cand of results.slice(0, 5)) {
+      findings.push({
+        symbol: cand.symbol_name || cand.qualified_name || symbol,
+        kind: cand.kind || 'code_search',
+        file: cand.file_path,
+        evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
+        startLine: cand.symbol_start_line ?? cand.start_line,
+        endLine: cand.symbol_end_line ?? cand.end_line,
+      });
     }
   }
 
   // 3. Fallback query if no symbols were hinted
   if (mandate.hintedSymbols.length === 0) {
     const derivedQuery = mandate.title || 'cart';
-    const searchQuery = `search ${derivedQuery}`;
-    queriesRun.push(searchQuery);
-    const searchRes = runEntireGraphCommand([
-      'search',
-      '--repo',
-      repoPath,
-      '--query',
-      derivedQuery,
-      '--format',
-      'json',
-    ]);
-    if (searchRes.success && searchRes.data?.candidates) {
-      for (const cand of searchRes.data.candidates.slice(0, 5)) {
-        findings.push({
-          symbol: cand.symbol_name || cand.qualified_name || 'candidate',
-          kind: cand.kind || 'code_search',
-          file: cand.file_path,
-          evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
-        });
-      }
+    const searchRes = run(['search', '--repo', repoPath, '--query', derivedQuery, '--format', 'json']);
+    queriesRun.push(`search ${derivedQuery}`);
+    const results: any[] = searchRes.success && Array.isArray(searchRes.data?.results) ? searchRes.data.results : [];
+    for (const cand of results.slice(0, 5)) {
+      findings.push({
+        symbol: cand.symbol_name || cand.qualified_name || 'candidate',
+        kind: cand.kind || 'code_search',
+        file: cand.file_path,
+        evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
+        startLine: cand.symbol_start_line ?? cand.start_line,
+        endLine: cand.symbol_end_line ?? cand.end_line,
+      });
     }
   }
 
   // 4. Query hinted paths if present
   for (const p of mandate.hintedPaths) {
-    const pathQuery = `search ${p}`;
-    queriesRun.push(pathQuery);
-    const pathRes = runEntireGraphCommand(['search', '--repo', repoPath, '--query', p, '--format', 'json']);
-    if (pathRes.success && pathRes.data?.candidates) {
-      for (const cand of pathRes.data.candidates.slice(0, 3)) {
-        findings.push({
-          symbol: cand.symbol_name || cand.qualified_name || p,
-          kind: cand.kind || 'path_search',
-          file: cand.file_path,
-          evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
-        });
-      }
+    const pathRes = run(['search', '--repo', repoPath, '--query', p, '--format', 'json']);
+    queriesRun.push(`search ${p}`);
+    const results: any[] = pathRes.success && Array.isArray(pathRes.data?.results) ? pathRes.data.results : [];
+    for (const cand of results.slice(0, 3)) {
+      findings.push({
+        symbol: cand.symbol_name || cand.qualified_name || p,
+        kind: cand.kind || 'path_search',
+        file: cand.file_path,
+        evidence: (cand.snippet || `${cand.file_path}:${cand.start_line}`).slice(0, 150).trim(),
+        startLine: cand.symbol_start_line ?? cand.start_line,
+        endLine: cand.symbol_end_line ?? cand.end_line,
+      });
     }
   }
 
@@ -215,14 +239,27 @@ export function buildContext(repoPath: string, mandate: Mandate): ContextBundle 
     }
   }
 
+  // Deduplicate symbol facts by symbol
+  const seenSymbols = new Set<string>();
+  const uniqueSymbolFacts: SymbolFact[] = [];
+  for (const fact of symbolFacts) {
+    if (seenSymbols.has(fact.symbol)) continue;
+    seenSymbols.add(fact.symbol);
+    uniqueSymbolFacts.push(fact);
+  }
+
   notesList.push(
-    `Context gathered via Entire graph: executed ${queriesRun.length} queries, extracted ${uniqueFindings.length} findings.`
+    `Context gathered via Entire graph: executed ${queriesRun.length} queries, extracted ${uniqueFindings.length} findings for ${uniqueSymbolFacts.length} symbols.`
   );
 
   return {
-    queriesRun,
-    findings: uniqueFindings,
-    notes: notesList.join(' '),
-    indexSummary,
+    bundle: {
+      queriesRun,
+      findings: uniqueFindings,
+      symbolFacts: uniqueSymbolFacts,
+      notes: notesList.join(' '),
+      indexSummary,
+    },
+    rawCommands,
   };
 }

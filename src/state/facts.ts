@@ -20,6 +20,10 @@ export type FactPayload =
       criteriaCount?: number;
       hintedSymbols?: string[];
       hintedPaths?: string[];
+      /** Rubric criteria count (model-built) when a rubric was produced. */
+      rubricCriteriaCount?: number;
+      /** Model used to build the rubric. */
+      rubricModel?: string;
     }
   | {
       type: 'context_built';

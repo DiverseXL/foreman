@@ -1,0 +1,43 @@
+{
+  "_comment": "Prices are ESTIMATES per 1000 tokens (USD) derived from published list prices per 1,000,000 tokens. All dollar figures used by the ledger are estimates; gateway billing may differ. Do NOT treat these as authoritative. Models left null are refused by the ledger until filled.",
+  "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "claude-haiku": {
+    "input_per_1k": 0.001,
+    "output_per_1k": 0.005,
+    "input_per_1m": 1.0,
+    "output_per_1m": 5.0,
+    "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "verified": false,
+    "note": "estimate; gateway billing may differ"
+  },
+  "claude-sonnet-4.6": {
+    "input_per_1k": 0.003,
+    "output_per_1k": 0.015,
+    "input_per_1m": 3.0,
+    "output_per_1m": 15.0,
+    "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "verified": false,
+    "note": "estimate; gateway billing may differ"
+  },
+  "nova-micro": {
+    "input_per_1k": null,
+    "output_per_1k": null
+  },
+  "nova-lite": {
+    "input_per_1k": null,
+    "output_per_1k": null
+  },
+  "nova-pro": {
+    "input_per_1k": null,
+    "output_per_1k": null
+  },
+  "nova-2-lite": {
+    "input_per_1k": null,
+    "output_per_1k": null
+  },
+  "claude-opus-4.6": {
+    "input_per_1k": null,
+    "output_per_1k": null,
+    "note": "BLOCKED: claude-opus-4.6 must never be used"
+  }
+}

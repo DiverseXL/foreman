@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { modelFor } from "./router.js";
+import { assertCallAllowed, recordModelCall, STEP_MAX_COMPLETION_TOKENS_PER_CALL } from "./ledger.js";
 import type { ChatMessage, ModelCallResult, ModelTask } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://litellm.vision.aivar.app/v1";
@@ -7,11 +8,34 @@ const DEFAULT_BASE_URL = "https://litellm.vision.aivar.app/v1";
 export type CompleteOptions = {
   temperature?: number;
   maxTokens?: number;
+  /**
+   * OpenAI-compatible response_format. Verified against the gateway: json_schema
+   * with strict:true returns bare JSON, json_object returns fenced markdown.
+   */
+  responseFormat?: Record<string, unknown>;
 };
 
 export function litellmBaseUrl(): string {
   const value = process.env.LITELLM_BASE_URL?.trim();
   return value ? value : DEFAULT_BASE_URL;
+}
+
+/**
+ * Builds a strict JSON-schema response_format for the gateway. verified support
+ * was checked in scripts/probe-gateway.ts (bare JSON returned for both models).
+ */
+export function jsonSchemaResponseFormat(
+  name: string,
+  schema: unknown
+): Record<string, unknown> {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name,
+      strict: true,
+      schema,
+    },
+  };
 }
 
 /**
@@ -34,24 +58,43 @@ export async function complete(
   task: ModelTask,
   messages: ChatMessage[],
   options?: CompleteOptions,
+  runId?: string,
 ): Promise<ModelCallResult> {
   const model = modelFor(task);
   const client = getClient();
+
+  // Enforce per-call completion token cap
+  const maxTokens = Math.min(
+    options?.maxTokens ?? STEP_MAX_COMPLETION_TOKENS_PER_CALL,
+    STEP_MAX_COMPLETION_TOKENS_PER_CALL,
+  );
+
+  // Fail closed BEFORE spending: null price or exhausted budget refuses the call.
+  if (runId) {
+    assertCallAllowed(model);
+  }
+
   const response = await client.chat.completions.create({
     model,
     messages,
     temperature: options?.temperature,
-    max_tokens: options?.maxTokens,
+    max_tokens: maxTokens,
+    response_format: options?.responseFormat as never,
   });
 
   const text = response.choices[0]?.message?.content ?? "";
-  const usage = response.usage
-    ? {
-        promptTokens: response.usage.prompt_tokens,
-        completionTokens: response.usage.completion_tokens,
-        totalTokens: response.usage.total_tokens,
-      }
-    : undefined;
+  const promptTokens = response.usage?.prompt_tokens ?? 0;
+  const completionTokens = response.usage?.completion_tokens ?? 0;
+  const usage = {
+    promptTokens,
+    completionTokens,
+    totalTokens: response.usage?.total_tokens ?? (promptTokens + completionTokens),
+  };
+
+  // Record in the ledger (throws if the price is null or the budget is exhausted)
+  if (runId) {
+    recordModelCall({ runId, model, promptTokens, completionTokens });
+  }
 
   return {
     text,

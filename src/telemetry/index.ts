@@ -33,6 +33,10 @@ import type { Span } from '@opentelemetry/api';
  *   }
  */
 
+/**
+ * Span kinds accepted by neatlogs trace(). 'LLM' is valid for the lower-level
+ * trace() API (TraceSpanKind = SpanKind | 'LLM' | 'RERANKER' | 'VECTOR_STORE').
+ */
 export type SupportedSpanKind =
   | 'WORKFLOW'
   | 'AGENT'
@@ -42,7 +46,8 @@ export type SupportedSpanKind =
   | 'EMBEDDING'
   | 'MCP_TOOL'
   | 'GUARDRAIL'
-  | 'EVALUATOR';
+  | 'EVALUATOR'
+  | 'LLM';
 
 let isTelemetryInitialized = false;
 
