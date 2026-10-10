@@ -1,16 +1,17 @@
 /**
  * Cost and token ledger for Foreman model calls.
  *
- * Appends one JSON line per model call to runs/ledger.jsonl and fails closed
- * when a call cannot be costed or when the running estimated total exceeds the
- * configured cap. All dollar figures are ESTIMATES (see prices.json).
+ * One JSON line per model call in runs/ledger.jsonl. Costs come from the
+ * gateway-reported headers when present (x-litellm-response-cost); the
+ * price-based estimate is only a fallback when a header is absent.
  *
- * Refusal semantics (order matters):
- *  - Price unknown (null in prices.json): the entry IS appended so token usage is
- *    still tracked, then the call is refused (fail closed, cannot enforce a cap).
- *  - Running estimated total already at/over FOREMAN_BUDGET_USD: the call is
- *    refused before appending.
- *  - Cumulative tokens would exceed STEP_MAX_TOTAL_TOKENS: refused before appending.
+ * Refusal semantics (fail closed):
+ *  - Pre-call (assertCallAllowed): refuse when the running cost has reached
+ *    FOREMAN_BUDGET_USD, or when the last reported key spend plus RESERVE_USD
+ *    would exceed the reported key max budget.
+ *  - Post-call (recordModelCall): append the entry (so tokens and spend are
+ *    always tracked), then refuse when no cost could be determined at all, or
+ *    when this call's reported spend + reserve exceeds the reported max budget.
  */
 
 import fs from 'node:fs';
@@ -23,14 +24,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Types
 // ---------------------------------------------------------------------------
 
+export type CostSource = 'gateway' | 'estimate' | 'none';
+
 export interface LedgerEntry {
   ts: string;
   runId: string;
   model: string;
   promptTokens: number;
   completionTokens: number;
-  /** null when the price for this model is not configured */
+  /** price-based estimate (fallback only); null when the price is not configured */
   estimatedCostUsd: number | null;
+  /** gateway-reported cost from x-litellm-response-cost; null when absent */
+  gatewayCostUsd: number | null;
+  /** effective cost used for the budget: gateway cost, else the estimate */
+  costUsd: number | null;
+  costSource: CostSource;
+  /** gateway-reported key spend (x-litellm-key-spend) */
+  keySpendUsd: number | null;
+  /** gateway-reported key max budget (x-litellm-key-max-budget) */
+  keyMaxBudgetUsd: number | null;
 }
 
 export interface PriceConfig {
@@ -45,13 +57,22 @@ export interface PriceConfig {
 
 type PricesFile = Record<string, PriceConfig>;
 
+export interface ModelCallCosts {
+  gatewayCostUsd?: number | null;
+  keySpendUsd?: number | null;
+  keyMaxBudgetUsd?: number | null;
+}
+
 // ---------------------------------------------------------------------------
-// Step-level caps (enforced per run, not per call)
+// Step-level caps
 // ---------------------------------------------------------------------------
 
 export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 4000;
-export const STEP_MAX_TOTAL_TOKENS = 60000;
+export const STEP_MAX_TOTAL_TOKENS = 40000;
 export const STEP_MAX_PATCH_ATTEMPTS = 1;
+
+/** Safety reserve, in USD, kept below the gateway key's max budget. */
+export const RESERVE_USD = 3;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -62,6 +83,12 @@ export function budgetCapUsd(): number {
   if (!raw) return 8;
   const parsed = Number.parseFloat(raw);
   return Number.isFinite(parsed) ? parsed : 8;
+}
+
+/** True when reported spend plus the reserve would exceed the max budget. */
+export function keyBudgetExceeded(spend: number | null, max: number | null): boolean {
+  if (spend === null || max === null) return false;
+  return spend + RESERVE_USD > max;
 }
 
 function loadPrices(pricesPath = path.resolve(__dirname, 'prices.json')): PricesFile {
@@ -93,13 +120,23 @@ export function estimateCost(
   return (promptTokens / 1000) * entry.input_per_1k + (completionTokens / 1000) * entry.output_per_1k;
 }
 
+/** Most recently reported key spend/max budget from the ledger. */
+export function latestKeyBudget(runsDir = 'runs'): { spend: number | null; max: number | null } {
+  const entries = readLedger(getLedgerPath(runsDir));
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.keySpendUsd !== null || entry.keyMaxBudgetUsd !== null) {
+      return { spend: entry.keySpendUsd ?? null, max: entry.keyMaxBudgetUsd ?? null };
+    }
+  }
+  return { spend: null, max: null };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/**
- * Throws if the model's price entry is missing or null in prices.json.
- */
+/** Throws if the model's price entry is missing or null in prices.json. */
 export function assertPriceConfigured(model: string, pricesPath?: string): void {
   const prices = loadPrices(pricesPath);
   const entry = prices[model];
@@ -117,25 +154,33 @@ export function assertPriceConfigured(model: string, pricesPath?: string): void 
 }
 
 /**
- * Pre-call guard: refuses (throws) when the price is unknown or the running
- * estimated total has reached the cap. Call this BEFORE issuing the model request.
+ * Pre-call guard. Refuses before the request when the running cost has reached
+ * FOREMAN_BUDGET_USD, or when the last reported key spend + RESERVE_USD would
+ * exceed the reported key max budget.
  */
-export function assertCallAllowed(model: string, runsDir = 'runs', pricesPath?: string): void {
-  assertPriceConfigured(model, pricesPath);
+export function assertCallAllowed(model: string, runsDir = 'runs'): void {
   const spent = cumulativeCost(runsDir);
   const cap = budgetCapUsd();
   if (spent >= cap) {
     throw new Error(
-      `Ledger: budget cap reached. Running estimated total $${spent.toFixed(6)} >= cap $${cap.toFixed(2)}. ` +
+      `Ledger: budget cap reached. Running cost $${spent.toFixed(6)} >= cap $${cap.toFixed(2)}. ` +
         `Set FOREMAN_BUDGET_USD to increase.`
+    );
+  }
+
+  const { spend, max } = latestKeyBudget(runsDir);
+  if (keyBudgetExceeded(spend, max)) {
+    throw new Error(
+      `Ledger: key budget reserve reached. Reported key spend $${(spend ?? 0).toFixed(6)} + reserve ` +
+        `$${RESERVE_USD.toFixed(2)} > max budget $${(max ?? 0).toFixed(2)} (model ${model}).`
     );
   }
 }
 
-/** Cumulative estimated cost from the ledger (null costs count as zero). */
+/** Cumulative cost from the ledger (entries with no cost count as zero). */
 export function cumulativeCost(runsDir = 'runs'): number {
   const entries = readLedger(getLedgerPath(runsDir));
-  return entries.reduce((sum, entry) => sum + (entry.estimatedCostUsd ?? 0), 0);
+  return entries.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
 }
 
 /** Cumulative tokens from the ledger. */
@@ -147,14 +192,12 @@ export function cumulativeTokens(runsDir = 'runs'): { prompt: number; completion
 }
 
 /**
- * Records a model call in the ledger.
- *
- * Always appends an entry so token usage is tracked, even when the price is null
- * (in which case estimatedCostUsd is null). Refuses (throws) when:
- *  - the price for the model is null in prices.json (after appending, so tokens
- *    are still tracked), or
- *  - the running estimated total has reached FOREMAN_BUDGET_USD (before appending), or
- *  - the cumulative token total would exceed STEP_MAX_TOTAL_TOKENS (before appending).
+ * Records a model call. Always appends an entry so tokens and spend are tracked.
+ * Refuses (throws) when:
+ *  - the running cost has reached FOREMAN_BUDGET_USD (before appending),
+ *  - the cumulative token total would exceed STEP_MAX_TOTAL_TOKENS (before appending),
+ *  - no cost could be determined (no gateway header and no configured price) — appended, then throws,
+ *  - this call's reported key spend + RESERVE_USD exceeds the reported max budget — appended, then throws.
  */
 export function recordModelCall(opts: {
   runId: string;
@@ -163,11 +206,25 @@ export function recordModelCall(opts: {
   completionTokens: number;
   runsDir?: string;
   pricesPath?: string;
-}): LedgerEntry {
-  const { runId, model, promptTokens, completionTokens, runsDir = 'runs', pricesPath } = opts;
+} & ModelCallCosts): LedgerEntry {
+  const {
+    runId,
+    model,
+    promptTokens,
+    completionTokens,
+    runsDir = 'runs',
+    pricesPath,
+    gatewayCostUsd = null,
+    keySpendUsd = null,
+    keyMaxBudgetUsd = null,
+  } = opts;
 
   const prices = loadPrices(pricesPath);
   const estimatedCostUsd = estimateCost(model, promptTokens, completionTokens, prices);
+  const costUsd = gatewayCostUsd !== null ? gatewayCostUsd : estimatedCostUsd;
+  const costSource: CostSource =
+    gatewayCostUsd !== null ? 'gateway' : estimatedCostUsd !== null ? 'estimate' : 'none';
+
   const ledgerPath = getLedgerPath(runsDir);
 
   // Token cap is checked before appending.
@@ -179,12 +236,12 @@ export function recordModelCall(opts: {
   }
 
   // Budget cap is checked before appending (only meaningful when this call is costed).
-  if (estimatedCostUsd !== null) {
+  if (costUsd !== null) {
     const spent = cumulativeCost(runsDir);
     const cap = budgetCapUsd();
     if (spent >= cap) {
       throw new Error(
-        `Ledger: budget cap reached. Running estimated total $${spent.toFixed(6)} >= cap $${cap.toFixed(2)}. ` +
+        `Ledger: budget cap reached. Running cost $${spent.toFixed(6)} >= cap $${cap.toFixed(2)}. ` +
           `Set FOREMAN_BUDGET_USD to increase.`
       );
     }
@@ -197,17 +254,30 @@ export function recordModelCall(opts: {
     promptTokens,
     completionTokens,
     estimatedCostUsd,
+    gatewayCostUsd,
+    costUsd,
+    costSource,
+    keySpendUsd,
+    keyMaxBudgetUsd,
   };
 
   const dir = path.dirname(ledgerPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf-8');
 
-  // Unknown price: token entry is recorded, then the call is refused.
-  if (estimatedCostUsd === null) {
+  // No cost could be determined: the entry is recorded, then the call is refused.
+  if (costSource === 'none') {
     throw new Error(
-      `Ledger: price for model "${model}" is null in prices.json; the call was refused because the budget cap ` +
-        `cannot be enforced. Token usage (${promptTokens}/${completionTokens}) was recorded.`
+      `Ledger: no gateway cost header and price for model "${model}" is null in prices.json; the call was ` +
+        `refused because the budget cap cannot be enforced. Tokens (${promptTokens}/${completionTokens}) were recorded.`
+    );
+  }
+
+  // Reported spend crossed the reserve threshold: recorded, then refused.
+  if (keyBudgetExceeded(keySpendUsd, keyMaxBudgetUsd)) {
+    throw new Error(
+      `Ledger: key budget reserve reached. Reported key spend $${(keySpendUsd ?? 0).toFixed(6)} + reserve ` +
+        `$${RESERVE_USD.toFixed(2)} > max budget $${(keyMaxBudgetUsd ?? 0).toFixed(2)}.`
     );
   }
 

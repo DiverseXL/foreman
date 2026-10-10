@@ -1,0 +1,14 @@
+{
+  "edits": [
+    {
+      "file": "src/cart.ts",
+      "search": "import { roundCurrency } from './rounding.js';",
+      "replace": "import { roundCurrency } from './rounding.js';\nimport Decimal from 'decimal.js';"
+    },
+    {
+      "file": "package.json",
+      "search": "  \"devDependencies\": {\n    \"tsx\": \"^4.23.15\"\n  }",
+      "replace": "  \"dependencies\": {\n    \"decimal.js\": \"^10.4.3\"\n  },\n  \"devDependencies\": {\n    \"tsx\": \"^4.23.15\"\n  }"
+    }
+  ]
+}

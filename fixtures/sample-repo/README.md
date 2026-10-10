@@ -3,7 +3,7 @@
 A lightweight shopping cart pricing engine written in plain TypeScript ESM with zero runtime dependencies.
 
 ## Notice: Synthetic Benchmark Repository
-This repository is a synthetic target designed for benchmarking and validating the Foreman autonomous agent. The code contains three intentionally seeded issues:
+This repository is a synthetic target designed for benchmarking and validating the Foreman autonomous agent. The bugs below are synthetic and seeded: they are deliberately planted reproduction cases, not real defects, and the `src/` sources intentionally contain no comments that label or reveal them.
 - `repro-issue-1`: Boundary handling bug in bulk discount calculation.
 - `repro-issue-2`: Floating-point accumulation drift in cart subtotal calculation.
 - `repro-issue-3`: Freight carrier ceiling rounding requirement in volumetric shipping calculation.

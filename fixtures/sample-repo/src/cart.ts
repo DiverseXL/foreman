@@ -20,13 +20,8 @@ export function applyItemDiscounts(item: CartItem): number {
 
 /**
  * Computes raw sum of items before order-level adjustments.
- *
- * NOTE: Seeded synthetic bug for issue-2 is located here.
- * Naive float accumulation produces IEEE-754 precision drift (0.10 + 0.20 = 0.30000000000000004).
- * Gate trap suggests installing decimal library; correct fix is integer-cents arithmetic.
  */
 export function calculateRawItemsSubtotal(items: CartItem[]): number {
-  // SEEDED BUG (Issue 2): Direct floating-point accumulation causes precision drift
   return items.reduce((acc, item) => acc + item.price * item.quantity, 0);
 }
 

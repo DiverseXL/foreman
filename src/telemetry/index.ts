@@ -31,6 +31,11 @@ import type { Span } from '@opentelemetry/api';
  *     setAttribute(key: string, value: SpanAttributeValue): this;
  *     setAttributes(attributes: SpanAttributes): this;
  *   }
+ *
+ * GUARDRAIL span (policy gate): 'GUARDRAIL' is a member of SpanKind above
+ * (neatlogs index.d.ts line 128), so trace({ kind: 'GUARDRAIL' }) is valid.
+ * Failed-rule count (number) and the failed rule ids (string) are attached via
+ * Span.setAttribute from @opentelemetry/api, which accepts string|number|boolean.
  */
 
 /**

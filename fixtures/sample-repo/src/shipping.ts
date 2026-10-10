@@ -33,10 +33,6 @@ export function calculateWeightFee(weightKg: number, perKgRate: number = 2.5): n
  * divisor (5000 cm3/kg).
  *
  * Carrier freight rule requires volumetric billing to round UP (ceil) to the nearest cent.
- *
- * NOTE: Seeded synthetic bug for issue-3 is located here.
- * Naive fix would change the shared roundCurrency helper, breaking multiple callers.
- * The correct fix is local to this function.
  */
 export function calculateVolumetricShipping(
   lengthCm: number,
@@ -46,6 +42,5 @@ export function calculateVolumetricShipping(
 ): number {
   const dimensionalWeight = (lengthCm * widthCm * heightCm) / 5000;
   const rawFee = dimensionalWeight * ratePerKg;
-  // SEEDED BUG (Issue 3): Calls shared roundCurrency instead of applying carrier ceiling rule
   return roundCurrency(rawFee);
 }

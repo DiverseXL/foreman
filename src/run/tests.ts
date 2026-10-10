@@ -5,6 +5,8 @@ export interface TestRunResult {
   passed: number;
   failed: number;
   failingTests: string[];
+  /** Names of tests that reported as passing in this run. */
+  passingTests: string[];
   durationMs: number;
   /** Raw combined stdout/stderr of the test command. */
   output: string;
@@ -20,6 +22,7 @@ export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
   let failed = 0;
   let durationMs = 0;
   const failingTests: string[] = [];
+  const passingTests: string[] = [];
 
   // Check for node:test default spec output
   const specPassMatch = output.match(/ℹ\s+pass\s+(\d+)/);
@@ -41,6 +44,10 @@ export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
     const failMatches = [...output.matchAll(/(?:✖|\u2716)\s+([^\r\n(]+?)\s+\([\d.]+ms\)/g)];
     const uniqueFailing = Array.from(new Set(failMatches.map((m) => m[1].trim())));
     failingTests.push(...uniqueFailing);
+
+    // Spec reporter formats passing tests as: ✔ <test_name> (<duration>ms)
+    const passMatches = [...output.matchAll(/(?:✔|\u2714)\s+([^\r\n(]+?)\s+\([\d.]+ms\)/g)];
+    passingTests.push(...Array.from(new Set(passMatches.map((m) => m[1].trim()))));
   } else if (tapPassMatch && tapFailMatch) {
     passed = parseInt(tapPassMatch[1], 10);
     failed = parseInt(tapFailMatch[1], 10);
@@ -50,6 +57,10 @@ export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
     const tapFailMatches = [...output.matchAll(/^not ok\s+\d+\s+-\s+(.+)$/gm)];
     const uniqueFailing = Array.from(new Set(tapFailMatches.map((m) => m[1].trim())));
     failingTests.push(...uniqueFailing);
+
+    // TAP format passing tests: ok <number> - <test_name>
+    const tapPassMatches = [...output.matchAll(/^ok\s+\d+\s+-\s+(.+)$/gm)];
+    passingTests.push(...Array.from(new Set(tapPassMatches.map((m) => m[1].trim()))));
   } else {
     // Fallback if structured summary was not detected
     if (exitCode === 0) {
@@ -67,6 +78,7 @@ export function parseTestOutput(output: string, exitCode = 0): TestRunResult {
     passed,
     failed,
     failingTests,
+    passingTests,
     durationMs,
     output: raw,
   };

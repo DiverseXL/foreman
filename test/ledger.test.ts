@@ -1,4 +1,4 @@
-import { describe, it, before, after, afterEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,19 +8,23 @@ import {
   cumulativeTokens,
   estimateCost,
   getLedgerPath,
+  keyBudgetExceeded,
+  latestKeyBudget,
+  RESERVE_USD,
+  type LedgerEntry,
   type PriceConfig,
 } from '../src/model/ledger.js';
 
 const scratch = path.resolve('test-ledger-scratch');
 const ledgerPath = getLedgerPath(scratch);
 
-function readLines(): unknown[] {
+function readEntries(): LedgerEntry[] {
   if (!fs.existsSync(ledgerPath)) return [];
   return fs
     .readFileSync(ledgerPath, 'utf-8')
     .split(/\r?\n/)
     .filter((l) => l.trim().length > 0)
-    .map((l) => JSON.parse(l));
+    .map((l) => JSON.parse(l) as LedgerEntry);
 }
 
 const previousBudget = process.env.FOREMAN_BUDGET_USD;
@@ -32,6 +36,11 @@ describe('ledger', () => {
 
   after(() => {
     if (fs.existsSync(scratch)) fs.rmSync(scratch, { recursive: true, force: true });
+  });
+
+  // Each test starts from an empty ledger so counts and caps are deterministic.
+  beforeEach(() => {
+    if (fs.existsSync(ledgerPath)) fs.rmSync(ledgerPath, { force: true });
   });
 
   afterEach(() => {
@@ -48,18 +57,20 @@ describe('ledger', () => {
       completionTokens: 1000,
       runsDir: scratch,
     });
-    // 1000/1000 * 0.001 + 1000/1000 * 0.005 = 0.006 (estimate)
+    // 1000/1000 * 0.001 + 1000/1000 * 0.005 = 0.006 (price-based estimate fallback)
     assert.equal(entry.model, 'claude-haiku');
+    assert.equal(entry.costSource, 'estimate');
     assert.ok(typeof entry.estimatedCostUsd === 'number');
     assert.ok(Math.abs((entry.estimatedCostUsd ?? 0) - 0.006) < 1e-9);
-    assert.equal(readLines().length, 1);
+    assert.ok(Math.abs((entry.costUsd ?? 0) - 0.006) < 1e-9);
+    assert.equal(readEntries().length, 1);
     assert.ok(Math.abs(cumulativeCost(scratch) - 0.006) < 1e-9);
     assert.equal(cumulativeTokens(scratch).total, 2000);
   });
 
-  it('refuses a call once the running estimated total reaches the cap', () => {
+  it('refuses a call once the running cost reaches the cap', () => {
     process.env.FOREMAN_BUDGET_USD = '0';
-    const before = readLines().length;
+    const before = readEntries().length;
     assert.throws(
       () =>
         recordModelCall({
@@ -72,12 +83,12 @@ describe('ledger', () => {
       /budget cap/
     );
     // Refused BEFORE appending.
-    assert.equal(readLines().length, before);
+    assert.equal(readEntries().length, before);
   });
 
-  it('refuses a call whose price is null, but still records its tokens', () => {
+  it('refuses a call whose price is null and no gateway cost, but still records its tokens', () => {
     delete process.env.FOREMAN_BUDGET_USD;
-    const before = readLines().length;
+    const before = readEntries().length;
     assert.throws(
       () =>
         recordModelCall({
@@ -89,12 +100,74 @@ describe('ledger', () => {
         }),
       /price for model "nova-pro" is null/
     );
-    const after = readLines() as { model: string; estimatedCostUsd: number | null; promptTokens: number }[];
+    const after = readEntries();
     assert.equal(after.length, before + 1);
     const last = after[after.length - 1];
     assert.equal(last.model, 'nova-pro');
     assert.equal(last.estimatedCostUsd, null);
+    assert.equal(last.costSource, 'none');
     assert.equal(last.promptTokens, 7);
+  });
+
+  it('records the gateway-reported cost and key spend/budget from headers', () => {
+    delete process.env.FOREMAN_BUDGET_USD;
+    // Fixed header fixture, as returned by the gateway.
+    const entry = recordModelCall({
+      runId: 'test-run',
+      model: 'claude-haiku',
+      promptTokens: 336,
+      completionTokens: 170,
+      gatewayCostUsd: 0.000123,
+      keySpendUsd: 0.5,
+      keyMaxBudgetUsd: 20.0,
+      runsDir: scratch,
+    });
+    assert.equal(entry.costSource, 'gateway');
+    assert.equal(entry.gatewayCostUsd, 0.000123);
+    assert.equal(entry.costUsd, 0.000123);
+    assert.equal(entry.keySpendUsd, 0.5);
+    assert.equal(entry.keyMaxBudgetUsd, 20.0);
+    // Gateway cost takes precedence over the price estimate.
+    assert.notEqual(entry.estimatedCostUsd, 0.000123);
+  });
+
+  it('uses the gateway cost even when the model has no configured price', () => {
+    delete process.env.FOREMAN_BUDGET_USD;
+    const entry = recordModelCall({
+      runId: 'test-run',
+      model: 'nova-pro',
+      promptTokens: 10,
+      completionTokens: 5,
+      gatewayCostUsd: 0.0002,
+      runsDir: scratch,
+    });
+    assert.equal(entry.costSource, 'gateway');
+    assert.equal(entry.estimatedCostUsd, null);
+    assert.equal(entry.costUsd, 0.0002);
+  });
+
+  it('refuses a call when reported key spend plus the reserve would exceed the max budget', () => {
+    delete process.env.FOREMAN_BUDGET_USD;
+    // 18.5 + 3 reserve = 21.5 > 20 max budget
+    assert.throws(
+      () =>
+        recordModelCall({
+          runId: 'test-run',
+          model: 'claude-haiku',
+          promptTokens: 10,
+          completionTokens: 5,
+          gatewayCostUsd: 0.0001,
+          keySpendUsd: 18.5,
+          keyMaxBudgetUsd: 20.0,
+          runsDir: scratch,
+        }),
+      /reserve/
+    );
+    // The spend was still recorded for tracking.
+    const entries = readEntries();
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].keySpendUsd, 18.5);
+    assert.equal(latestKeyBudget(scratch).spend, 18.5);
   });
 
   it('estimateCost returns null for an unconfigured or null-priced model', () => {
@@ -105,5 +178,13 @@ describe('ledger', () => {
     assert.equal(estimateCost('missing', 1000, 1000, prices), null);
     assert.equal(estimateCost('unknown', 1000, 1000, prices), null);
     assert.ok(Math.abs((estimateCost('known', 1000, 1000, prices) ?? 0) - 0.006) < 1e-9);
+  });
+
+  it('keyBudgetExceeded applies the reserve threshold', () => {
+    assert.equal(RESERVE_USD, 3);
+    assert.equal(keyBudgetExceeded(18, 20), true); // 21 > 20
+    assert.equal(keyBudgetExceeded(16, 20), false); // 19 <= 20
+    assert.equal(keyBudgetExceeded(null, 20), false);
+    assert.equal(keyBudgetExceeded(18, null), false);
   });
 });

@@ -119,4 +119,42 @@ describe('deriveStatus pure function', () => {
     ];
     assert.equal(deriveStatus(facts), 'budget_exhausted');
   });
+
+  it('returns "ready_to_ship" when the target passes with remaining unrelated failures', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'run_started', runId: 'run-1', issueId: '1' },
+      { seq: 2, ts: '2026-10-10T10:00:01Z', type: 'patch_proposed', attempt: 1, diffHash: 'h1' },
+      { seq: 3, ts: '2026-10-10T10:00:02Z', type: 'gate_result', attempt: 1, passed: true, failedRules: [] },
+      {
+        seq: 4,
+        ts: '2026-10-10T10:00:03Z',
+        type: 'tests_result',
+        attempt: 1,
+        passed: true,
+        targetPassed: true,
+        regressions: [],
+        failingTests: ['repro-issue-2', 'repro-issue-3'],
+      },
+    ];
+    assert.equal(deriveStatus(facts), 'ready_to_ship');
+  });
+
+  it('returns "tests_failing" when a regression blocks the attempt', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'run_started', runId: 'run-1', issueId: '1' },
+      { seq: 2, ts: '2026-10-10T10:00:01Z', type: 'patch_proposed', attempt: 1, diffHash: 'h1' },
+      { seq: 3, ts: '2026-10-10T10:00:02Z', type: 'gate_result', attempt: 1, passed: true, failedRules: [] },
+      {
+        seq: 4,
+        ts: '2026-10-10T10:00:03Z',
+        type: 'tests_result',
+        attempt: 1,
+        passed: false,
+        targetPassed: true,
+        regressions: ['calculates standard tax for small amount'],
+        failingTests: ['calculates standard tax for small amount', 'repro-issue-2'],
+      },
+    ];
+    assert.equal(deriveStatus(facts), 'tests_failing');
+  });
 });

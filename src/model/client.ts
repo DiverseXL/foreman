@@ -74,13 +74,23 @@ export async function complete(
     assertCallAllowed(model);
   }
 
-  const response = await client.chat.completions.create({
-    model,
-    messages,
-    temperature: options?.temperature,
-    max_tokens: maxTokens,
-    response_format: options?.responseFormat as never,
-  });
+  const { data: response, response: rawResponse } = await client.chat.completions
+    .create({
+      model,
+      messages,
+      temperature: options?.temperature,
+      max_tokens: maxTokens,
+      response_format: options?.responseFormat as never,
+    })
+    .withResponse();
+
+  // Gateway-reported cost/spend headers (only these; never credentials).
+  const headerValue = (name: string): number | null => {
+    const raw = rawResponse?.headers?.get(name);
+    if (raw === null || raw === undefined || raw === '') return null;
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
 
   const text = response.choices[0]?.message?.content ?? "";
   const promptTokens = response.usage?.prompt_tokens ?? 0;
@@ -91,9 +101,17 @@ export async function complete(
     totalTokens: response.usage?.total_tokens ?? (promptTokens + completionTokens),
   };
 
-  // Record in the ledger (throws if the price is null or the budget is exhausted)
+  // Record in the ledger using gateway-reported cost when available.
   if (runId) {
-    recordModelCall({ runId, model, promptTokens, completionTokens });
+    recordModelCall({
+      runId,
+      model,
+      promptTokens,
+      completionTokens,
+      gatewayCostUsd: headerValue('x-litellm-response-cost'),
+      keySpendUsd: headerValue('x-litellm-key-spend'),
+      keyMaxBudgetUsd: headerValue('x-litellm-key-max-budget'),
+    });
   }
 
   return {

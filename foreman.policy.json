@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "_comment": "Human-written, fail-closed policy for the Foreman patch gate. Plain code decides; the model never edits this file. Any rule that throws counts as a FAIL.",
+  "allowedPaths": ["src/**"],
+  "deniedPaths": [
+    "test/**",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "node_modules/**",
+    ".git/**"
+  ],
+  "denyDotfiles": true,
+  "maxFiles": 3,
+  "maxChangedLines": 40,
+  "maxTransitiveCallers": 10,
+  "lockfiles": ["package.json", "package-lock.json"],
+  "secretPatterns": [
+    "sk-[A-Za-z0-9]{20,}",
+    "AKIA[0-9A-Z]{16}",
+    "ghp_[A-Za-z0-9]{36}",
+    "gho_[A-Za-z0-9]{36}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "(api[_-]?key|apikey|secret|token|password)[\"']?\\s*[:=]\\s*[\"'][^\"']{8,}[\"']"
+  ]
+}

@@ -49,6 +49,12 @@ export function deriveStatus(facts: readonly Fact[]): ForemanStatus {
     const tests = [...facts].reverse().find((f) => f.type === 'tests_result' && f.attempt === maxAttempt);
     const validator = [...facts].reverse().find((f) => f.type === 'validator_result' && f.attempt === maxAttempt);
 
+    // The independent validator is optional at this stage: when a validator_result
+    // is absent, a passing gate plus a passing tests_result (target passed with no
+    // regressions) is enough to be ready_to_ship. When present it must pass.
+    const validatorOk =
+      !validator || (validator.type === 'validator_result' && validator.allCriteriaPass);
+
     if (
       gate &&
       gate.type === 'gate_result' &&
@@ -56,9 +62,7 @@ export function deriveStatus(facts: readonly Fact[]): ForemanStatus {
       tests &&
       tests.type === 'tests_result' &&
       tests.passed &&
-      validator &&
-      validator.type === 'validator_result' &&
-      validator.allCriteriaPass
+      validatorOk
     ) {
       return 'ready_to_ship';
     }

@@ -22,6 +22,23 @@ export function gitDiff(repoPath: string): string {
     .trim();
 }
 
+/** Commits the current run-copy changes as the attempt commit; returns its sha. */
+export function commitAttempt(repoPath: string, message: string): string {
+  execSync('git add -A', { cwd: repoPath, stdio: 'pipe' });
+  execSync(`git commit -m "${message}"`, { cwd: repoPath, stdio: 'pipe' });
+  return execSync('git rev-parse HEAD', { cwd: repoPath, stdio: 'pipe' }).toString('utf-8').trim();
+}
+
+/** Diff between two commits in the run copy (used for the gate and patch artifacts). */
+export function gitDiffRange(repoPath: string, base: string, head: string): string {
+  return execSync(`git diff ${base} ${head} --no-color --no-ext-diff`, {
+    cwd: repoPath,
+    stdio: 'pipe',
+  })
+    .toString('utf-8')
+    .trim();
+}
+
 export interface WorkspaceResult {
   baseCommit: string;
   branch: string;

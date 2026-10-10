@@ -30,14 +30,11 @@ export function calculateCouponSplit(itemsTotal: number, couponValue: number, ra
  * - 20 or more items: 20% discount
  * - 10 to 19 items: 10% discount
  * - under 10 items: 0% discount
- *
- * NOTE: Seeded synthetic bug for issue-1 is located here.
  */
 export function calculateTieredBulkDiscount(quantity: number, unitPrice: number): number {
   if (quantity >= 20) {
     return roundCurrency(quantity * unitPrice * 0.20);
   }
-  // SEEDED BUG (Issue 1): Strict inequality excludes boundary condition quantity === 10
   if (quantity > 10) {
     return roundCurrency(quantity * unitPrice * 0.10);
   }

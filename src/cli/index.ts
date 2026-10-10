@@ -3,14 +3,25 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { createWorkspace, gitDiff, type WorkspaceResult } from '../run/workspace.js';
+import { createWorkspace, commitAttempt, gitDiffRange, type WorkspaceResult } from '../run/workspace.js';
 import { runTests, type TestRunResult } from '../run/tests.js';
-import { appendFact, readFacts } from '../state/facts.js';
+import { appendFact, readFacts, type PatchSource } from '../state/facts.js';
 import { deriveStatus } from '../state/derive.js';
 import { loadMandate, type Mandate } from '../mandate/load.js';
 import { buildContext, type ContextBundle } from '../context/graph.js';
 import { buildRubric, type RubricResult } from '../mandate/rubric.js';
-import { proposePatch, applyEdits, buildSourceBundle, type ProposeResult, type ApplyResult } from '../patch/propose.js';
+import {
+  proposePatch,
+  applyEdits,
+  buildSourceBundle,
+  validateEditsPayload,
+  type PatchEdit,
+  type ProposeResult,
+  type ApplyResult,
+} from '../patch/propose.js';
+import { collectChanges, callerCountFor } from '../policy/changed.js';
+import { loadPolicy, runGate } from '../policy/gate.js';
+import type { GateContext } from '../policy/types.js';
 import { withWorkflow, withStage, flushTelemetry, shutdownTelemetry } from '../telemetry/index.js';
 import { cumulativeCost, cumulativeTokens } from '../model/index.js';
 
@@ -19,21 +30,23 @@ interface CliArgs {
   issue?: string;
   setupOnly: boolean;
   through?: string;
+  patchFrom?: string;
 }
 
 function parseArgs(args: string[]): CliArgs {
   const result: CliArgs = { setupOnly: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === 'run') {
-      result.command = 'run';
-    } else if (arg === '--issue') {
+    if (arg === 'run') result.command = 'run';
+    else if (arg === '--issue') {
       result.issue = args[i + 1];
       i++;
-    } else if (arg === '--setup-only') {
-      result.setupOnly = true;
-    } else if (arg === '--through') {
+    } else if (arg === '--setup-only') result.setupOnly = true;
+    else if (arg === '--through') {
       result.through = args[i + 1];
+      i++;
+    } else if (arg === '--patch-from') {
+      result.patchFrom = args[i + 1];
       i++;
     }
   }
@@ -59,11 +72,9 @@ function sanitizeGraphArgs(args: string[]): string {
 
 function persistContext(runId: string, workspace: WorkspaceResult, mandate: Mandate): ContextBundle {
   const dir = ensureRunDir(runId);
-
   fs.writeFileSync(path.join(dir, 'mandate.json'), JSON.stringify(mandate, null, 2) + '\n', 'utf-8');
 
   const { bundle, rawCommands } = buildContext(workspace.path, mandate);
-
   fs.writeFileSync(path.join(dir, 'context.json'), JSON.stringify(bundle, null, 2) + '\n', 'utf-8');
 
   const graphRawDir = path.join(dir, 'graph-raw');
@@ -76,18 +87,27 @@ function persistContext(runId: string, workspace: WorkspaceResult, mandate: Mand
   return bundle;
 }
 
+function loadInjectedEdits(file: string): PatchEdit[] {
+  if (!fs.existsSync(file)) throw new Error(`Injected patch file not found: ${file}`);
+  const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  const validation = validateEditsPayload(raw);
+  if (!validation.ok) throw new Error(`Injected patch invalid: ${validation.errors.join('; ')}`);
+  return validation.edits;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const parsed = parseArgs(argv);
 
   if (parsed.command !== 'run' || !parsed.issue) {
-    console.error('Usage: foreman run --issue <n> [--setup-only] [--through context|tests]');
+    console.error('Usage: foreman run --issue <n> [--setup-only] [--through context|tests] [--patch-from <file>]');
     process.exit(1);
   }
 
   const issueId = parsed.issue;
   const runId = `run-${Date.now()}`;
-  const throughTests = !parsed.setupOnly && parsed.through === 'tests';
-  const shouldRunContext = !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context' || throughTests);
+  const throughTests = !parsed.setupOnly && (parsed.through === 'tests' || Boolean(parsed.patchFrom));
+  const shouldRunContext =
+    !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context' || throughTests);
 
   let rubricResult: RubricResult | undefined;
   let proposeResult: ProposeResult | undefined;
@@ -177,62 +197,90 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
 
     if (throughTests && mandate && contextBundle) {
-      // --- Rubric (LLM) ---
-      try {
-        rubricResult = await withStage(
-          'rubric',
-          'LLM',
-          async (stageSpan) => {
-            const rubric = await buildRubric(mandate!, runId);
-            stageSpan.setAttribute('foreman.llm.model', rubric.model);
-            stageSpan.setAttribute('foreman.rubric.criteria_count', rubric.criteria.length);
-            stageSpan.setAttribute('foreman.rubric.attempts', rubric.attempts);
-            if (rubric.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', rubric.usage.promptTokens);
-            if (rubric.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', rubric.usage.completionTokens);
-            return rubric;
-          },
-          { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
-        );
-      } catch (err) {
-        stoppedReason = err instanceof Error ? err.message : String(err);
-      }
+      let patchSource: PatchSource = 'model';
 
-      if (rubricResult) {
+      if (parsed.patchFrom) {
+        // ----- Injected patch (demonstration only; model skipped) -----
+        patchSource = 'injected';
+        console.log('=========================================');
+        console.log('INJECTED PATCH');
+        console.log(`Source: ${parsed.patchFrom}`);
+        console.log('Model calls skipped');
+        console.log('=========================================');
+
         appendFact(runId, {
           type: 'mandate_created',
           issueId,
           title: mandate.title,
-          criteriaCount: rubricResult.criteria.length,
-          rubricCriteriaCount: rubricResult.criteria.length,
-          rubricModel: rubricResult.model,
+          criteriaCount: mandate.acceptanceCriteria.length,
           hintedSymbols: mandate.hintedSymbols,
           hintedPaths: mandate.hintedPaths,
         });
 
-        // --- Patch proposal (LLM) ---
-        const sources = buildSourceBundle(contextBundle, workspace.path);
         try {
-          proposeResult = await withStage(
-            'patch_propose',
+          const edits = loadInjectedEdits(parsed.patchFrom);
+          proposeResult = { edits, model: 'injected', attempts: 0 };
+        } catch (err) {
+          stoppedReason = err instanceof Error ? err.message : String(err);
+        }
+      } else {
+        // ----- Rubric (LLM) -----
+        try {
+          rubricResult = await withStage(
+            'rubric',
             'LLM',
             async (stageSpan) => {
-              const proposal = await proposePatch({ issue: mandate!, rubric: rubricResult!, sources }, runId);
-              stageSpan.setAttribute('foreman.llm.model', proposal.model);
-              stageSpan.setAttribute('foreman.patch.edit_count', proposal.edits.length);
-              stageSpan.setAttribute('foreman.patch.attempts', proposal.attempts);
-              stageSpan.setAttribute('foreman.patch.source_snippets', sources.length);
-              if (proposal.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', proposal.usage.promptTokens);
-              if (proposal.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', proposal.usage.completionTokens);
-              return proposal;
+              const rubric = await buildRubric(mandate!, runId);
+              stageSpan.setAttribute('foreman.llm.model', rubric.model);
+              stageSpan.setAttribute('foreman.rubric.criteria_count', rubric.criteria.length);
+              stageSpan.setAttribute('foreman.rubric.attempts', rubric.attempts);
+              if (rubric.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', rubric.usage.promptTokens);
+              if (rubric.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', rubric.usage.completionTokens);
+              return rubric;
             },
             { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
           );
         } catch (err) {
           stoppedReason = err instanceof Error ? err.message : String(err);
         }
+
+        if (rubricResult) {
+          appendFact(runId, {
+            type: 'mandate_created',
+            issueId,
+            title: mandate.title,
+            criteriaCount: rubricResult.criteria.length,
+            rubricCriteriaCount: rubricResult.criteria.length,
+            rubricModel: rubricResult.model,
+            hintedSymbols: mandate.hintedSymbols,
+            hintedPaths: mandate.hintedPaths,
+          });
+
+          // ----- Patch proposal (LLM) -----
+          const sources = buildSourceBundle(contextBundle, workspace.path);
+          try {
+            proposeResult = await withStage(
+              'patch_propose',
+              'LLM',
+              async (stageSpan) => {
+                const proposal = await proposePatch({ issue: mandate!, rubric: rubricResult!, sources }, runId);
+                stageSpan.setAttribute('foreman.llm.model', proposal.model);
+                stageSpan.setAttribute('foreman.patch.edit_count', proposal.edits.length);
+                stageSpan.setAttribute('foreman.patch.attempts', proposal.attempts);
+                stageSpan.setAttribute('foreman.patch.source_snippets', sources.length);
+                if (proposal.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', proposal.usage.promptTokens);
+                if (proposal.usage?.completionTokens !== undefined) stageSpan.setAttribute('foreman.llm.completion_tokens', proposal.usage.completionTokens);
+                return proposal;
+              },
+              { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
+            );
+          } catch (err) {
+            stoppedReason = err instanceof Error ? err.message : String(err);
+          }
+        }
       }
 
-      // --- Apply (TOOL) ---
+      // ----- Apply (TOOL) -----
       if (proposeResult) {
         applyResult = await withStage(
           'apply',
@@ -240,11 +288,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           async (stageSpan) => {
             const res = applyEdits(workspace.path, proposeResult!.edits);
             stageSpan.setAttribute('foreman.apply.ok', res.ok);
-            if (res.ok) {
-              stageSpan.setAttribute('foreman.apply.files', res.applied.length);
-            } else {
-              stageSpan.setAttribute('foreman.apply.reason', res.reason);
-            }
+            if (res.ok) stageSpan.setAttribute('foreman.apply.files', res.applied.length);
+            else stageSpan.setAttribute('foreman.apply.reason', res.reason);
             return res;
           },
           { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
@@ -260,39 +305,117 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         }
       }
 
-      // --- Diff, hash, patch_proposed (after apply) ---
+      // ----- Commit attempt, diff, hash, patch_proposed, then gate -----
       if (applyResult?.ok) {
-        const diff = gitDiff(workspace.path);
+        const attemptCommit = commitAttempt(workspace.path, `attempt-1 (${patchSource})`);
+        const changeSummary = collectChanges(workspace.path, workspace.baseCommit, attemptCommit);
+        const diff = gitDiffRange(workspace.path, workspace.baseCommit, attemptCommit);
         diffHash = crypto.createHash('sha256').update(diff).digest('hex');
-        appendFact(runId, { type: 'patch_proposed', attempt: 1, diffHash });
+        appendFact(runId, { type: 'patch_proposed', attempt: 1, diffHash, patchSource });
 
         const dir = ensureRunDir(runId);
         fs.writeFileSync(path.join(dir, 'attempt-1.diff'), diff + '\n', 'utf-8');
 
-        // --- Tests (EVALUATOR) ---
-        finalTests = await withStage(
-          'tests',
-          'EVALUATOR',
+        // ----- Policy gate (GUARDRAIL) -----
+        const contextSymbols = new Set<string>();
+        for (const sf of contextBundle.symbolFacts) contextSymbols.add(sf.symbol);
+        for (const f of contextBundle.findings) contextSymbols.add(f.symbol);
+
+        const symbolCallerCounts: Record<string, number> = {};
+        for (const sf of contextBundle.symbolFacts) symbolCallerCounts[sf.symbol] = sf.callerCount;
+        for (const symbol of changeSummary.changedSymbols) {
+          if (!(symbol.name in symbolCallerCounts)) {
+            const count = callerCountFor(workspace.path, symbol.name);
+            if (count !== null) symbolCallerCounts[symbol.name] = count;
+          }
+        }
+
+        const gateContext: GateContext = {
+          changedFiles: changeSummary.changedFiles,
+          changedSymbols: changeSummary.changedSymbols,
+          addedLines: changeSummary.addedLines,
+          contextSymbols: Array.from(contextSymbols),
+          symbolCallerCounts,
+        };
+
+        const policy = loadPolicy();
+        const gate = await withStage(
+          'policy_gate',
+          'GUARDRAIL',
           async (stageSpan) => {
-            const testRes = runTests(workspace.path);
-            stageSpan.setAttribute('foreman.tests.passed', testRes.passed);
-            stageSpan.setAttribute('foreman.tests.failed', testRes.failed);
-            stageSpan.setAttribute('foreman.tests.exit_code', testRes.exitCode);
-            stageSpan.setAttribute('foreman.tests.duration_ms', testRes.durationMs);
-            return testRes;
+            const result = runGate(gateContext, policy);
+            stageSpan.setAttribute('foreman.gate.failed_count', result.failedRules.length);
+            stageSpan.setAttribute('foreman.gate.failed_rules', result.failedRules.join(','));
+            stageSpan.setAttribute('foreman.gate.symbol_method', changeSummary.method);
+            return result;
           },
           { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
         );
 
-        const testsPassed = finalTests.exitCode === 0 && finalTests.failed === 0;
         appendFact(runId, {
-          type: 'tests_result',
+          type: 'gate_result',
           attempt: 1,
-          passed: testsPassed,
-          failingTests: finalTests.failingTests,
+          passed: gate.passed,
+          failedRules: gate.failedRules,
         });
 
-        fs.writeFileSync(path.join(runDirPath(runId), 'tests-1.txt'), finalTests.output, 'utf-8');
+        fs.writeFileSync(
+          path.join(dir, 'gate-1.json'),
+          JSON.stringify(
+            {
+              attempt: 1,
+              passed: gate.passed,
+              failedRules: gate.failedRules,
+              changedSymbolMethod: changeSummary.method,
+              changedSymbolNote: changeSummary.note,
+              changedFiles: changeSummary.changedFiles,
+              changedSymbols: changeSummary.changedSymbols,
+              rules: gate.rules,
+            },
+            null,
+            2
+          ) + '\n',
+          'utf-8'
+        );
+
+        if (!gate.passed) {
+          // Fail closed: do NOT run the tests.
+          appendFact(runId, { type: 'attempt_failed', attempt: 1, failureClass: 'blocked_policy' });
+          stoppedReason = `Policy gate blocked the attempt (failed rules: ${gate.failedRules.join(', ')}); tests were not run.`;
+        } else {
+          // ----- Tests (EVALUATOR) -----
+          finalTests = await withStage(
+            'tests',
+            'EVALUATOR',
+            async (stageSpan) => {
+              const testRes = runTests(workspace.path);
+              stageSpan.setAttribute('foreman.tests.passed', testRes.passed);
+              stageSpan.setAttribute('foreman.tests.failed', testRes.failed);
+              stageSpan.setAttribute('foreman.tests.exit_code', testRes.exitCode);
+              stageSpan.setAttribute('foreman.tests.duration_ms', testRes.durationMs);
+              return testRes;
+            },
+            { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
+          );
+
+          const targetName = `repro-issue-${issueId}`;
+          const targetPassed =
+            finalTests.passingTests.includes(targetName) && !finalTests.failingTests.includes(targetName);
+          const baselinePassing = new Set(baseline.passingTests);
+          const regressions = finalTests.failingTests.filter((t) => baselinePassing.has(t));
+          const testsPassed = targetPassed && regressions.length === 0;
+
+          appendFact(runId, {
+            type: 'tests_result',
+            attempt: 1,
+            passed: testsPassed,
+            targetPassed,
+            regressions,
+            failingTests: finalTests.failingTests,
+          });
+
+          fs.writeFileSync(path.join(runDirPath(runId), 'tests-1.txt'), finalTests.output, 'utf-8');
+        }
       }
     } else if (mandate) {
       appendFact(runId, {
@@ -305,7 +428,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       });
     }
 
-    // --- Console summary (no emojis) ---
+    // ----- Console summary (no emojis) -----
     const facts = readFacts(runId);
     const derivedStatus = deriveStatus(facts);
 
@@ -314,6 +437,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.log(`Run ID: ${runId}`);
     console.log(`Issue: ${issueId}`);
     console.log(`Through: ${throughTests ? 'tests' : shouldRunContext ? 'context' : 'setup'}`);
+    if (parsed.patchFrom) console.log(`Patch Source: INJECTED (${parsed.patchFrom})`);
     console.log(`Derived Status: ${derivedStatus}`);
     console.log(`Trace ID: ${currentTraceId}`);
     console.log(`Workspace Path: ${workspace.path}`);
@@ -322,9 +446,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.log(
       `Baseline Tests: ${baseline.passed} passed, ${baseline.failed} failed, exit code ${baseline.exitCode} (${baseline.durationMs}ms)`
     );
-    if (baseline.failingTests.length > 0) {
-      console.log(`Baseline Failing Tests: ${baseline.failingTests.join(', ')}`);
-    }
+    if (baseline.failingTests.length > 0) console.log(`Baseline Failing Tests: ${baseline.failingTests.join(', ')}`);
 
     if (mandate) {
       console.log('\nMandate Summary');
@@ -345,20 +467,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           `Index: ${contextBundle.indexSummary.files} files, ${contextBundle.indexSummary.symbols} symbols, ${contextBundle.indexSummary.relations} relations (completeness: ${contextBundle.indexSummary.completeness})`
         );
       }
-      console.log(`Queries Run (${contextBundle.queriesRun.length}):`);
-      for (const q of contextBundle.queriesRun) console.log(`  > entire graph ${q}`);
-      console.log(`Findings (${contextBundle.findings.length}):`);
-      for (const f of contextBundle.findings.slice(0, 10)) {
-        console.log(`  [${f.kind}] ${f.symbol} (${f.file}): ${f.evidence.slice(0, 80)}`);
-      }
-      if (contextBundle.findings.length > 10) {
-        console.log(`  ... and ${contextBundle.findings.length - 10} more findings`);
-      }
-      if (contextBundle.symbolFacts.length > 0) {
-        console.log(`Symbol Facts (${contextBundle.symbolFacts.length}):`);
-        for (const sf of contextBundle.symbolFacts) {
-          console.log(`  ${sf.symbol} (${sf.file}): callers=${sf.callerCount} callees=${sf.calleeCount}`);
-        }
+      console.log(`Findings: ${contextBundle.findings.length}; symbolFacts: ${contextBundle.symbolFacts.length}`);
+      for (const sf of contextBundle.symbolFacts) {
+        console.log(`  symbol ${sf.symbol} (${sf.file}): callers=${sf.callerCount} callees=${sf.calleeCount}`);
       }
     }
 
@@ -370,9 +481,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
 
     if (proposeResult) {
-      console.log('\nPatch Proposal');
+      console.log(`\nPatch Proposal (source: ${parsed.patchFrom ? 'INJECTED' : 'model'})`);
       console.log('--------------');
-      console.log(`Model: ${proposeResult.model} (attempts: ${proposeResult.attempts})`);
+      console.log(`Model: ${proposeResult.model}`);
       for (const e of proposeResult.edits) {
         const firstLine = e.search.split('\n')[0].slice(0, 70);
         console.log(`  edit ${e.file}: search[${e.search.length} chars] starts "${firstLine}"`);
@@ -389,11 +500,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       console.log(
         `Result: ${finalTests.passed} passed, ${finalTests.failed} failed, exit code ${finalTests.exitCode} (${finalTests.durationMs}ms)`
       );
-      if (finalTests.failingTests.length > 0) {
-        console.log(`Failing Tests: ${finalTests.failingTests.join(', ')}`);
-      } else {
-        console.log('Failing Tests: none');
-      }
+      const targetName = `repro-issue-${issueId}`;
+      const targetPassed = finalTests.passingTests.includes(targetName) && !finalTests.failingTests.includes(targetName);
+      const baselinePassing = new Set(baseline.passingTests);
+      const regressions = finalTests.failingTests.filter((t) => baselinePassing.has(t));
+      console.log(`targetPassed (${targetName}): ${targetPassed}`);
+      console.log(`regressions: ${regressions.length === 0 ? 'none' : regressions.join(', ')}`);
+      if (finalTests.failingTests.length > 0) console.log(`Failing Tests: ${finalTests.failingTests.join(', ')}`);
     }
 
     if (stoppedReason) {
@@ -407,7 +520,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.log('\nLedger');
     console.log('------');
     console.log(`Model calls tokens (all runs): prompt=${totals.prompt} completion=${totals.completion} total=${totals.total}`);
-    console.log(`Estimated cost (all runs): $${cost.toFixed(6)} (ESTIMATES; gateway billing may differ)`);
+    console.log(`Cost (all runs, gateway-reported where available): $${cost.toFixed(6)}`);
 
     console.log(`\nFacts Count: ${facts.length}`);
 

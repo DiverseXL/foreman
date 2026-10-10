@@ -1,0 +1,9 @@
+{
+  "edits": [
+    {
+      "file": "src/rounding.ts",
+      "search": "  return Math.round(amount * 100) / 100;",
+      "replace": "  return Math.ceil(amount * 100) / 100;"
+    }
+  ]
+}

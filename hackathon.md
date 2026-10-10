@@ -19,6 +19,7 @@ DiverseXL
 - 2026-10-10 12:35:09 +01:00 - Step 3: run engine, append-only facts, derived status, workspace isolation, offline test runner, and neatlogs telemetry
 - 2026-10-10 13:12:54 +01:00 - Step 4: deterministic mandate parsing, entire-graph structural context retrieval, and telemetry spans
 - 2026-10-10 - Model router added. Sonnet for patch, Haiku for validate and cheap. LiteLLM base URL https://litellm.vision.aivar.app/v1. API key in .env only (LITELLM_API_KEY).
+- 2026-10-10 16:40:44 +01:00 - Step 6: fail-closed policy gate (7 rules, one pure function each, throw=fail), target/regression test judging (tests_result now carries targetPassed/regressions), ledger switched to gateway-reported cost plus key spend/budget with a 3 USD reserve refusal, GUARDRAIL trace span, injected-patch mode (--patch-from), cleaned the seeded-bug comments from the fixture src, and documented demonstration injected patches under docs/evidence/injected-patches/.
 - 2026-10-10 16:11:42 +01:00 - Step 5: first real model calls. Gateway pre-flight (tiny calls to claude-haiku and claude-sonnet-4.6, raw HTTP cost headers, structured JSON support verified via response_format json_schema). Model-built rubric (claude-haiku) with schema validation, structured patch proposal (claude-sonnet-4.6) applied under an exact-once rule, git diff hashing, target tests, per-run artifacts (mandate.json, context.json, graph-raw/), and a fail-closed cost/token ledger (src/model/ledger.ts). Prices in prices.json are ESTIMATES; models with null prices are refused.
 
 # Entire evidence

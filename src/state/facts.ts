@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+export type PatchSource = 'model' | 'injected';
+
 export type AttemptFailureClass =
   | 'blocked_policy'
   | 'tests_failed'
@@ -31,9 +33,19 @@ export type FactPayload =
       findingCount?: number;
       indexedSymbols?: number;
     }
-  | { type: 'patch_proposed'; attempt: number; diffHash: string }
+  | { type: 'patch_proposed'; attempt: number; diffHash: string; patchSource?: PatchSource }
   | { type: 'gate_result'; attempt: number; passed: boolean; failedRules: string[] }
-  | { type: 'tests_result'; attempt: number; passed: boolean; failingTests: string[] }
+  | {
+      type: 'tests_result';
+      attempt: number;
+      /** true only when the target test passes AND there are no regressions */
+      passed: boolean;
+      /** the test named repro-issue-<n> passed */
+      targetPassed?: boolean;
+      /** tests that passed at baseline and fail now */
+      regressions?: string[];
+      failingTests: string[];
+    }
   | { type: 'validator_result'; attempt: number; allCriteriaPass: boolean }
   | { type: 'attempt_failed'; attempt: number; failureClass: AttemptFailureClass }
   | { type: 'budget_checked'; exhausted: boolean }
