@@ -1,0 +1,59 @@
+STEP 5 of the Foreman build. Do only this step, then stop and wait.
+
+FIRST ACTION: run and report verbatim Get-Location, git rev-parse --show-toplevel, git log --oneline -5, entire status, entire session list.
+
+Context: Foreman is a TypeScript CLI agent. Steps 3 and 4 built the run engine, the facts log, mandate parsing and graph context. This step adds the first model calls: a model-built rubric, a patch proposal, applying the patch in the run copy, and running tests. No policy gate and no validator yet; those are the next steps.
+
+Rules:
+- No emojis. PowerShell-compatible commands.
+- Never run git commit or git push in the Foreman repo. Stage with git add only and print a proposed commit message. Git inside runs/<runId>/repo is allowed.
+- Never use --no-verify, change hooks, or kill processes. If anything hangs more than 30 seconds, stop and report.
+- Never read, print, or ask for .env or any key. Never print a gateway key.
+- Do not guess. Before writing model code, list the models the gateway actually offers (use the gateway's own model-listing mechanism; show the real command and output with no key) and make ONE tiny real call to each model I will use. If a default model name in src/model/router.ts is not accepted, report it and change the default only to a model that was verified. Test whether the gateway supports structured or JSON output; show the result. If it does not, use prompt-instructed JSON with schema validation.
+- For neatlogs, derive usage from node_modules/neatlogs/dist/index.d.ts and quote the declarations you rely on.
+- Cap spend: max 1 patch attempt in this step, max 4000 completion tokens per call, and record every call's token usage from the response.
+- Flag any placeholder before writing it. In your final report list as FAILED anything retried or worked around.
+
+Build:
+1. Persist artifacts per run under runs/<runId>/: mandate.json (full), context.json (the full bundle, including per-symbol caller and callee counts and the raw graph findings), and the raw JSON output of each graph command under graph-raw/. Also copy ONE run's raw graph JSON for issue 3 to docs/evidence/entire-graph-issue-3/ (committed, no secrets).
+2. src/mandate/rubric.ts: a model call (cheap model) that turns the issue text into 3 to 6 checkable rubric criteria, each {id, text, check: "test"|"diff"|"behavior"}. Validate against a schema; on invalid output retry once, then append needs_human and stop. Add a mandate fact that records criteria count and the model used.
+3. src/patch/propose.ts: a patch-model call that receives the issue, rubric, and ONLY the relevant source from context.json (the symbol bodies and their callers' call sites, read from the run copy), and returns structured edits [{file, search, replace}] validated by schema. Apply the edits yourself: every search string must occur exactly once in its file; otherwise record a failed attempt and stop. Never accept a unified diff from the model.
+4. After applying, compute git diff in the run copy, hash it, append patch_proposed, run the target tests, append tests_result, and save attempt-1.diff and tests-1.txt.
+5. Traces: stage spans for rubric (LLM via trace, kind 'LLM'), patch (LLM), apply (TOOL), tests (EVALUATOR), with model name, prompt tokens and completion tokens set as span attributes if supported.
+6. CLI: foreman run --issue <n> --through tests runs everything. Keep --through context and --setup-only working.
+7. Tests with node:test for: edit application (exact-once rule, missing search, duplicate search) and schema validation (valid and invalid rubric and edit payloads), using fixed fixtures and no model calls.
+8. Update hackathon.md with a real-time Build log entry. Stage everything.
+
+Verification with real output: (a) the gateway model list and the per-model tiny-call results, (b) npm test, (c) a real run on issue 1: npm run foreman -- run --issue 1 --through tests, with full console output, (d) the contents of facts.jsonl, mandate.json and attempt-1.diff, (e) test results after the patch, stating whether repro-issue-1 now passes and whether anything else broke, (f) total tokens used across all calls, (g) neatlogs trace id with span names, (h) git status, git diff --cached --stat, a search showing no key in staged files. List what you could not verify. Stop and wait.
+
+---
+
+STEP 5 of the Foreman build. Do only this step, then stop and wait.
+
+FIRST ACTION: run and report verbatim Get-Location, git rev-parse --show-toplevel, git log --oneline -5, entire status, entire session list.
+
+Context: Foreman is a TypeScript CLI agent. Steps 3 and 4 built the run engine, the facts log, mandate parsing and graph context. A model router exists in src/model. This step adds the first real model calls: a model-built rubric, a patch proposal, applying the patch in the run copy, and running tests. No policy gate and no validator yet; those are the next steps.
+
+Known facts, from the official guide https://neatlogs.com/hackathon/models: the gateway base URL is https://litellm.vision.aivar.app/v1 (OpenAI-compatible); the models offered are nova-micro, nova-lite, nova-pro, nova-2-lite, claude-haiku, claude-sonnet-4.6, claude-opus-4.6; the key has a shared $20 budget over 30 days and requests stop when it is used. NEVER use claude-opus-4.6.
+
+Rules:
+- No emojis. PowerShell-compatible commands.
+- Never run git commit or git push in the Foreman repo. Stage with git add only and print a proposed commit message. Git inside runs/<runId>/repo is allowed.
+- Never use --no-verify, change hooks, or kill processes. If anything hangs more than 30 seconds, stop and report.
+- Never read, print, or ask for .env or any key.
+- Do not guess. Before writing model code, make ONE tiny real call (max 20 completion tokens) to each model I will use (claude-haiku and claude-sonnet-4.6) and show the output with no key. Inspect the raw HTTP response headers and body of one real call and report exactly which usage or cost fields the gateway returns. Do not invent an endpoint for budget information; if you want to try one, say so first and only call endpoints that appear in the guide above. Test whether the gateway supports structured JSON output; show the result. If it does not, use prompt-instructed JSON with schema validation.
+- For neatlogs, derive usage from node_modules/neatlogs/dist/index.d.ts and quote the declarations you rely on.
+- Cost safety: add src/model/ledger.ts that appends every model call (model, prompt tokens, completion tokens, estimated cost, timestamp, runId) to runs/ledger.jsonl and refuses any call once the running estimated total exceeds a cap read from the env var FOREMAN_BUDGET_USD (default 8). Estimated cost uses prices from a prices.json file. Do NOT invent prices: leave the numbers in prices.json as null with a comment, make the ledger refuse to run while any needed price is null, and tell me which values I must fill in from the models' published list prices. The ledger tracks tokens even when prices are null. Also cap this step: max 1 patch attempt, max 4000 completion tokens per call, max 60000 total tokens.
+- Flag any placeholder before writing it. In your final report list as FAILED anything retried or worked around.
+
+Build:
+1. Persist artifacts per run under runs/<runId>/: mandate.json (full), context.json (the full bundle, including per-symbol caller and callee counts and the raw graph findings), and the raw JSON output of each graph command under graph-raw/. Copy ONE run's raw graph JSON for issue 3 to docs/evidence/entire-graph-issue-3/ (committed, no secrets).
+2. src/mandate/rubric.ts: a model call (claude-haiku) that turns the issue text into 3 to 6 checkable rubric criteria, each {id, text, check: "test"|"diff"|"behavior"}. Validate against a schema; on invalid output retry once, then append needs_human and stop. Record the criteria count and the model used in the mandate fact.
+3. src/patch/propose.ts: a claude-sonnet-4.6 call that receives the issue, the rubric, and ONLY the relevant source from context.json (symbol bodies and their callers' call sites, read from the run copy), and returns structured edits [{file, search, replace}] validated by schema. Apply the edits yourself: every search string must occur exactly once in its file; otherwise record a failed attempt and stop. Never accept a unified diff from the model.
+4. After applying, compute git diff in the run copy, hash it, append patch_proposed, run the target tests, append tests_result, and save attempt-1.diff and tests-1.txt.
+5. Traces: stage spans for rubric (kind 'LLM' via trace), patch (LLM), apply (TOOL), tests (EVALUATOR), with model name, prompt tokens and completion tokens as span attributes if supported.
+6. CLI: foreman run --issue <n> --through tests runs everything. Keep --through context and --setup-only working.
+7. node:test tests for: edit application (exact-once rule, missing search, duplicate search), schema validation (valid and invalid rubric and edit payloads), and the ledger (appends, refuses over cap, refuses with null prices), all with fixed fixtures and no model calls.
+8. In hackathon.md under Entire evidence, add these lines exactly: "Checkpoint 01M4JT40HZGG35HK6VBBDTQS3B (engine commit)" and "Checkpoint 01M4K3QGW1D9S183TNZFEJ1KA4 (commit 54dd8af1a84a53a5b662a22f24b089bd852e7ad4): https://entire.io/gh/DiverseXL/foreman/commit/54dd8af1a84a53a5b662a22f24b089bd852e7ad4". Add a real-time Build log entry. Stage everything.
+
+Verification with real output: (a) the tiny-call results and the real response fields, (b) npm test, (c) a real run on issue 1: npm run foreman -- run --issue 1 --through tests, with full console output, (d) the contents of facts.jsonl, mandate.json, attempt-1.diff and runs/ledger.jsonl, (e) test results after the patch, stating whether repro-issue-1 now passes and whether anything else broke, (f) total tokens used across all calls, (g) neatlogs trace id with span names, (h) git status, git diff --cached --stat, and a search showing no key in staged files. List what you could not verify. Stop and wait.
