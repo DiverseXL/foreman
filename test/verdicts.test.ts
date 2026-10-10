@@ -34,9 +34,9 @@ describe('code-decided criteria', () => {
 
   it('partitions rubric criteria by check: test -> code, diff/behavior -> validator', () => {
     const criteria: RubricCriterion[] = [
-      { id: 'r1', text: 'a', check: 'test' },
-      { id: 'r2', text: 'b', check: 'diff' },
-      { id: 'r3', text: 'c', check: 'behavior' },
+      { id: 'r1', text: 'a', check: 'test', evidence_ref: { kind: 'test', value: 'repro-issue-1' } },
+      { id: 'r2', text: 'b', check: 'diff', evidence_ref: { kind: 'symbol', value: 'f' } },
+      { id: 'r3', text: 'c', check: 'behavior', evidence_ref: { kind: 'issue_text', value: 'a' } },
     ];
     const { judgment, test } = partitionRubric(criteria);
     assert.deepEqual(

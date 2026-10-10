@@ -17,6 +17,7 @@
   "maxAttempts": 3,
   "validatorMinConfidence": 0.7,
   "validatorEscalation": true,
+  "validatorModel": "nova-pro",
   "maxTokensPerRun": 60000,
   "maxWallSeconds": 300,
   "lockfiles": ["package.json", "package-lock.json"],

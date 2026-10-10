@@ -8,9 +8,11 @@ import {
   cumulativeTokens,
   estimateCost,
   getLedgerPath,
+  assertCallAllowed,
   keyBudgetExceeded,
   latestKeyBudget,
   RESERVE_USD,
+  STEP_MAX_TOTAL_TOKENS,
   type LedgerEntry,
   type PriceConfig,
 } from '../src/model/ledger.js';
@@ -84,6 +86,24 @@ describe('ledger', () => {
     );
     // Refused BEFORE appending.
     assert.equal(readEntries().length, before);
+  });
+
+  it('refuses a model call before it would exceed the total token cap', () => {
+    const entry: LedgerEntry = {
+      ts: new Date(0).toISOString(),
+      runId: 'test-run',
+      model: 'claude-haiku',
+      promptTokens: STEP_MAX_TOTAL_TOKENS,
+      completionTokens: 0,
+      estimatedCostUsd: 0,
+      gatewayCostUsd: 0,
+      costUsd: 0,
+      costSource: 'gateway',
+      keySpendUsd: null,
+      keyMaxBudgetUsd: null,
+    };
+    fs.writeFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf-8');
+    assert.throws(() => assertCallAllowed('claude-haiku', scratch), /step token cap/);
   });
 
   it('refuses a call whose price is null and no gateway cost, but still records its tokens', () => {

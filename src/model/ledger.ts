@@ -67,9 +67,9 @@ export interface ModelCallCosts {
 // Step-level caps
 // ---------------------------------------------------------------------------
 
-export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 4000;
-// Step-8 budget: at most 150000 total tokens across the step's runs.
-export const STEP_MAX_TOTAL_TOKENS = 150000;
+export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 6000;
+export const STEP_MAX_TOTAL_TOKENS = 200000;
+
 export const STEP_MAX_PATCH_ATTEMPTS = 1;
 
 /** Safety reserve, in USD, kept below the gateway key's max budget. */
@@ -160,6 +160,13 @@ export function assertPriceConfigured(model: string, pricesPath?: string): void 
  * exceed the reported key max budget.
  */
 export function assertCallAllowed(model: string, runsDir = 'runs'): void {
+  const tokens = cumulativeTokens(runsDir);
+  if (tokens.total >= STEP_MAX_TOTAL_TOKENS) {
+    throw new Error(
+      `Ledger: step token cap reached. Cumulative tokens ${tokens.total} >= cap ${STEP_MAX_TOTAL_TOKENS}.`
+    );
+  }
+
   const spent = cumulativeCost(runsDir);
   const cap = budgetCapUsd();
   if (spent >= cap) {

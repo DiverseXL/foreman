@@ -6,6 +6,7 @@ import {
   createWorkspace,
   commitAttempt,
   gitDiffRange,
+  gitShowFile,
   resetToBase,
   type WorkspaceResult,
 } from '../run/workspace.js';
@@ -14,12 +15,13 @@ import { appendFact, readFacts, type PatchSource } from '../state/facts.js';
 import { deriveStatus } from '../state/derive.js';
 import { loadMandate, type Mandate } from '../mandate/load.js';
 import { buildContext, type ContextBundle } from '../context/graph.js';
-import { buildRubric, type RubricResult } from '../mandate/rubric.js';
+import { buildRubric, scanTestNames, type RubricResult } from '../mandate/rubric.js';
 import {
   proposePatch,
   applyEdits,
   buildSourceBundle,
   extractSymbolBody,
+  findReproTest,
   validateEditsPayload,
   type PatchEdit,
 } from '../patch/propose.js';
@@ -41,7 +43,7 @@ import {
   shutdownTelemetry,
   type SupportedSpanKind,
 } from '../telemetry/index.js';
-import { cumulativeCost, cumulativeTokens, runTotals, validatorModel } from '../model/index.js';
+import { cumulativeCost, cumulativeTokens, runTotals } from '../model/index.js';
 
 interface CliArgs {
   command?: string;
@@ -128,8 +130,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const runDir = path.resolve(runDirPath(runId));
   const startedAtMs = Date.now();
   const firstAttemptPatchFrom = parsed.firstAttemptPatchFrom;
-  const shouldRunContext = !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context');
-  const runPipeline = !parsed.setupOnly && parsed.through !== 'context';
+  const shouldRunContext = !parsed.setupOnly;
+  const runPipeline = !parsed.setupOnly && parsed.through !== 'context' && parsed.through !== 'setup-only';
 
   let stoppedReason: string | undefined;
 
@@ -223,7 +225,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           'rubric',
           'LLM',
           async (stageSpan) => {
-            const rubric = await buildRubric(mandate!, runId);
+            const knownSymbols = [
+              ...mandate!.hintedSymbols,
+              ...contextBundle!.symbolFacts.map((s) => s.symbol),
+              ...contextBundle!.findings.map((f) => f.symbol),
+            ];
+            const rubric = await buildRubric(mandate!, runId, {
+              validity: {
+                knownTestNames: scanTestNames(workspace.path),
+                knownSymbols,
+              },
+            });
             stageSpan.setAttribute('foreman.llm.model', rubric.model);
             stageSpan.setAttribute('foreman.rubric.criteria_count', rubric.criteria.length);
             if (rubric.usage?.promptTokens !== undefined) stageSpan.setAttribute('foreman.llm.prompt_tokens', rubric.usage.promptTokens);
@@ -251,7 +263,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         appendFact(runId, {
           type: 'rubric_created',
           model: rubricResult.model,
-          criteria: rubricResult.criteria.map((c) => ({ id: c.id, text: c.text, check: c.check })),
+          criteria: rubricResult.criteria.map((c) => ({
+            id: c.id,
+            text: c.text,
+            check: c.check,
+            evidence_ref: c.evidence_ref,
+          })),
         });
         fs.writeFileSync(path.join(runDir, 'rubric.json'), JSON.stringify(rubricResult, null, 2) + '\n', 'utf-8');
       }
@@ -271,6 +288,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           ),
           ...contextBundle.findings.slice(0, 40).map((f) => `${f.kind} ${f.symbol} @ ${f.file}: ${f.evidence}`),
         ].join('\n');
+
+        const reproTest = findReproTest(workspace.path, issueId);
 
         let firstAttemptPatch: PatchEdit[] | undefined;
         if (firstAttemptPatchFrom) {
@@ -292,7 +311,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
               'patch_propose',
               'LLM',
               async (stageSpan) => {
-                const p = await proposePatch({ issue: mandate!, rubric: rubricResult!, sources, memoryText }, runId);
+                const p = await proposePatch(
+                  {
+                    issue: mandate!,
+                    rubric: rubricResult!,
+                    sources,
+                    memoryText,
+                    policy: { allowedPaths: policy.allowedPaths, deniedPaths: policy.deniedPaths },
+                    reproTest,
+                  },
+                  runId
+                );
                 stageSpan.setAttribute('foreman.llm.model', p.model);
                 stageSpan.setAttribute('foreman.patch.edit_count', p.edits.length);
                 stageSpan.setAttribute('foreman.patch.attempts', p.attempts);
@@ -315,17 +344,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             withStage(
               'validator',
               'EVALUATOR',
-              () => validatePatch(input, runId, policy.validatorMinConfidence),
-              { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.validator.model': validatorModel() }
+              () => validatePatch(input, runId, policy.validatorMinConfidence, undefined, policy.validatorModel),
+              { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.validator.model': policy.validatorModel }
             ),
           callerCount: (symbol) => callerCountFor(workspace.path, symbol),
-          readChangedSymbolSources: (change) =>
+          readChangedFunctions: (change) =>
             change.changedSymbols.map((s) => {
               const full = path.resolve(workspace.path, s.file);
               const root = path.resolve(workspace.path);
-              if (!full.startsWith(root) || !fs.existsSync(full)) return { symbol: s.name, file: s.file, content: '' };
-              const content = fs.readFileSync(full, 'utf-8');
-              return { symbol: s.name, file: s.file, content: extractSymbolBody(content, s.name, 80) };
+              const after = full.startsWith(root) && fs.existsSync(full) ? fs.readFileSync(full, 'utf-8') : '';
+              const before = gitShowFile(workspace.path, workspace.baseCommit, s.file);
+              return {
+                symbol: s.name,
+                file: s.file,
+                before: extractSymbolBody(before, s.name, 80),
+                after: extractSymbolBody(after, s.name, 80),
+              };
             }),
           callSites: () =>
             contextBundle.findings

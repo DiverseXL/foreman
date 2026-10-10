@@ -39,6 +39,15 @@ export function resetToBase(repoPath: string, baseCommit: string): void {
   execSync('git clean -fd', { cwd: repoPath, stdio: 'pipe' });
 }
 
+/** Reads a file at a given ref (for example the base commit) from the run copy. */
+export function gitShowFile(repoPath: string, ref: string, file: string): string {
+  try {
+    return execSync(`git show ${ref}:${file}`, { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch {
+    return '';
+  }
+}
+
 /** Diff between two commits in the run copy (used for the gate and patch artifacts). */
 export function gitDiffRange(repoPath: string, base: string, head: string): string {
   return execSync(`git diff ${base} ${head} --no-color --no-ext-diff`, {

@@ -27,6 +27,7 @@ const POLICY: Policy = {
   maxAttempts: 3,
   validatorMinConfidence: 0.7,
   validatorEscalation: true,
+  validatorModel: 'nova-pro',
   maxTokensPerRun: 60000,
   maxWallSeconds: 300,
   lockfiles: ['package.json'],
@@ -36,9 +37,10 @@ const POLICY: Policy = {
 const RUBRIC: RubricResult = {
   model: 'claude-haiku',
   attempts: 1,
+  dropped: [],
   criteria: [
-    { id: 'r0', text: 'the repro test passes', check: 'test' },
-    { id: 'r1', text: 'the rounded total is correct', check: 'diff' },
+    { id: 'r0', text: 'the repro test passes', check: 'test', evidence_ref: { kind: 'test', value: 'repro-issue-1' } },
+    { id: 'r1', text: 'the rounded total is correct', check: 'diff', evidence_ref: { kind: 'symbol', value: 'roundCurrency' } },
   ],
 };
 

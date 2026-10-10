@@ -20,6 +20,8 @@ export interface Policy {
   validatorMinConfidence: number;
   /** Validator: allow ONE evidence-escalation re-run when only unclear verdicts block (added in step 8). */
   validatorEscalation: boolean;
+  /** Validator: model name for the independent validator (added in step 9; default nova-pro). */
+  validatorModel: string;
   /** Budget: per-run token cap (added in step 7). */
   maxTokensPerRun: number;
   /** Budget: per-run wall-clock cap in seconds (added in step 7). */

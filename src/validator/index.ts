@@ -47,10 +47,13 @@ export interface ValidatorCriterion {
   missing_evidence: string;
 }
 
-export interface ChangedSource {
+export interface ChangedFunction {
   symbol: string;
   file: string;
-  content: string;
+  /** Post-patch body (bounded), or '' when it cannot be resolved. */
+  after: string;
+  /** Pre-patch body from the base commit (bounded), or '' when it cannot be resolved. */
+  before: string;
 }
 
 export interface CallSite {
@@ -73,8 +76,8 @@ export interface ValidatorInput {
   regressions: string[];
   gate: { passed: boolean; failedRules: string[]; rules: { ruleId: string; passed: boolean; detail: string }[] };
   evidenceText: string;
-  /** Post-patch source of every changed function (bounded to 80 lines each). */
-  changedSources: ChangedSource[];
+  /** Each changed function as BEFORE (base) and AFTER (post-patch) blocks, bounded to 80 lines each. */
+  changedFunctions: ChangedFunction[];
   passedTests: string[];
   failedTests: string[];
   /** Names of passing tests that exercise the changed symbols, if known. */
@@ -221,10 +224,13 @@ const MAX_SOURCE_CHARS = 6000;
 const MAX_ESCALATION_FILE_CHARS = 12000;
 const MAX_CALLER_BODY_CHARS = 6000;
 
-function sectionSources(sources: readonly ChangedSource[]): string {
-  if (sources.length === 0) return '(no changed-function source was resolved)';
-  return sources
-    .map((s) => `--- ${s.file} :: ${s.symbol} ---\n${s.content}`)
+function sectionChangedFunctions(functions: readonly ChangedFunction[]): string {
+  if (functions.length === 0) return '(no changed-function source was resolved)';
+  return functions
+    .map(
+      (f) =>
+        `--- ${f.file} :: ${f.symbol} ---\n[BEFORE]\n${f.before || '(unavailable)'}\n[AFTER]\n${f.after || '(unavailable)'}`
+    )
     .join('\n\n')
     .slice(0, MAX_SOURCE_CHARS);
 }
@@ -251,8 +257,8 @@ function formatInput(input: ValidatorInput): string {
     'Gate rule details:',
     input.gate.rules.map((r) => `- ${r.ruleId}: ${r.passed ? 'pass' : 'FAIL'} (${r.detail})`).join('\n'),
     '',
-    'Post-patch source of the changed functions:',
-    sectionSources(input.changedSources),
+    'Changed functions as BEFORE/AFTER blocks:',
+    sectionChangedFunctions(input.changedFunctions),
     '',
     'Direct call sites of the changed symbols:',
     sectionCallSites(input.callSites),
@@ -308,13 +314,14 @@ export type ValidatorCallModel = (
 ) => Promise<ModelCallResult>;
 
 async function defaultCallModel(
+  model: string,
   messages: ChatMessage[],
   runId: string,
   schemaName: string,
   schema: SchemaNode
 ): Promise<ModelCallResult> {
   return completeWith(
-    validatorModel(),
+    model,
     messages,
     { maxTokens: 1500, responseFormat: jsonSchemaResponseFormat(schemaName, pruneSchemaForWire(schema)) },
     runId,
@@ -330,8 +337,11 @@ export async function validatePatch(
   input: ValidatorInput,
   runId: string,
   minConfidence: number,
-  callModel: ValidatorCallModel = defaultCallModel
+  callModel?: ValidatorCallModel,
+  modelName: string = validatorModel()
 ): Promise<ValidatorRunResult> {
+  const call: ValidatorCallModel =
+    callModel ?? ((messages, rid, schemaName, schema) => defaultCallModel(modelName, messages, rid, schemaName, schema));
   const rubricIds = input.criteria.map((c) => c.id);
   const baseMessages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -356,7 +366,7 @@ export async function validatePatch(
             },
           ];
 
-    const result = await callModel(messages, runId, VALIDATOR_SCHEMA_NAME, VALIDATOR_SCHEMA);
+    const result = await call(messages, runId, VALIDATOR_SCHEMA_NAME, VALIDATOR_SCHEMA);
     lastModel = result.model;
 
     const parsed = extractJson(result.text);

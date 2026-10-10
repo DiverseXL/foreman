@@ -58,8 +58,8 @@ export interface SupervisorEngine {
   validate(input: ValidatorInput): Promise<ValidatorRunResult>;
   /** Caller count for a symbol not already known to the context, or null. */
   callerCount(symbol: string): number | null;
-  /** Post-patch source of each changed function (bounded), or [] if unavailable. */
-  readChangedSymbolSources?(change: ChangeSummary): { symbol: string; file: string; content: string }[];
+  /** BEFORE/AFTER source of each changed function (bounded), or [] if unavailable. */
+  readChangedFunctions?(change: ChangeSummary): { symbol: string; file: string; before: string; after: string }[];
   /** Direct call sites of the changed symbols from context, or [] if unavailable. */
   callSites?(): { symbol: string; file: string; line?: number; evidence: string }[];
   /** Full evidence for the one escalation re-run. */
@@ -289,6 +289,11 @@ export function writeRunReport(
   const rubricCriteria = rubricFact && rubricFact.type === 'rubric_created' ? rubricFact.criteria : [];
   const checkById = new Map(rubricCriteria.map((c) => [c.id, c.check]));
   const testCriteria = rubricCriteria.filter((c) => c.check === 'test');
+  const droppedFact = facts.find((f) => f.type === 'criteria_dropped');
+  const droppedNote =
+    droppedFact && droppedFact.type === 'criteria_dropped' && droppedFact.ids.length > 0
+      ? droppedFact.ids.map((id, i) => `- ${id}: ${droppedFact.reasons[i] ?? ''}`).join('\n')
+      : '(none; every generated criterion passed code evidence validation)';
 
   const summaryRows: string[] = [
     '| Attempt | Injected | Patch source | Diff hash | Gate | Failed rules | targetPassed | Regressions | Escalated |',
@@ -400,6 +405,10 @@ export function writeRunReport(
     '## Escalation',
     '',
     escalationNotes.length > 0 ? escalationNotes.join('\n') : '(no evidence escalation was needed)',
+    '',
+    '## Dropped criteria',
+    '',
+    droppedNote,
     '',
     '## Failure memory used',
     '',
@@ -735,7 +744,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
             regressions,
             gate: { passed: gate.passed, failedRules: gate.failedRules, rules: gate.rules },
             evidenceText: context.evidenceText,
-            changedSources: engine.readChangedSymbolSources ? engine.readChangedSymbolSources(change) : [],
+            changedFunctions: engine.readChangedFunctions ? engine.readChangedFunctions(change) : [],
             passedTests: testRes.passingTests,
             failedTests: testRes.failingTests,
             testsExercisingSymbols: [],

@@ -8,9 +8,9 @@ describe('validateRubricPayload', () => {
   it('accepts a valid rubric with 3 to 6 criteria', () => {
     const raw = {
       criteria: [
-        { id: 'r1', text: 'repro-issue-1 passes', check: 'test' },
-        { id: 'r2', text: 'boundary uses >= 10', check: 'diff' },
-        { id: 'r3', text: 'quantity 20 still gets 20 percent', check: 'behavior' },
+        { id: 'r1', text: 'repro-issue-1 passes', check: 'test', evidence_ref: { kind: 'test', value: 'repro-issue-1' } },
+        { id: 'r2', text: 'boundary uses >= 10', check: 'diff', evidence_ref: { kind: 'symbol', value: 'calculateTieredBulkDiscount' } },
+        { id: 'r3', text: 'quantity 20 still gets 20 percent', check: 'behavior', evidence_ref: { kind: 'issue_text', value: '20% discount' } },
       ],
     };
     const result = validateRubricPayload(raw);

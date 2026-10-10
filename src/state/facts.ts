@@ -37,8 +37,9 @@ export type FactPayload =
   | {
       type: 'rubric_created';
       model?: string;
-      criteria: { id: string; text: string; check: string }[];
+      criteria: { id: string; text: string; check: string; evidence_ref?: { kind: string; value: string } }[];
     }
+  | { type: 'criteria_dropped'; ids: string[]; reasons: string[] }
   | {
       type: 'code_verdicts';
       attempt: number;

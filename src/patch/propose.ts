@@ -243,7 +243,86 @@ const SYSTEM_PROMPT =
   '(4) NEVER return a unified diff; only file/search/replace. ' +
   '(5) Make the smallest change that satisfies the issue. Prefer changes local to one function. ' +
   '(6) Do NOT add dependencies or new files. ' +
-  '(7) Do not modify shared helpers unless the issue explicitly requires it.';
+  '(7) Do not modify shared helpers unless the issue explicitly requires it. ' +
+  '(8) You may ONLY edit files under the ALLOWED paths listed below. Every path under the DENIED paths is ' +
+  'READ ONLY: never edit, add, move or delete a test file or any other denied path. The policy gate rejects ' +
+  'any such change. The repro test must pass by changing SOURCE CODE ONLY; do not edit a test to make it pass.';
+
+/**
+ * Read-only path section, built from the policy file's allowed/denied lists (loaded
+ * from foreman.policy.json at runtime by the caller) and the failing repro test as
+ * READ ONLY EVIDENCE.
+ */
+function readOnlySection(
+  policy: { allowedPaths: string[]; deniedPaths: string[] },
+  reproTest: { name: string; file: string; text: string } | undefined
+): string {
+  const lines = [
+    'READ-ONLY PATHS (the policy gate rejects any edit, addition, move or deletion):',
+    `- ALLOWED paths (the ONLY paths you may edit): ${policy.allowedPaths.join(', ') || '(none)'}`,
+    `- DENIED paths (READ ONLY; this includes every test file): ${policy.deniedPaths.join(', ') || '(none)'}`,
+    'The repro test must pass by changing SOURCE CODE ONLY. Never edit a test to make it pass.',
+    '',
+  ];
+  if (reproTest) {
+    lines.push(
+      `READ ONLY EVIDENCE: the failing repro test "${reproTest.name}" (${reproTest.file}); do not modify it:`,
+      '',
+      reproTest.text.slice(0, 4000),
+      ''
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+function walkFiles(dir: string): string[] {
+  const out: string[] = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkFiles(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+/** Locates the repro test named repro-issue-<n> in the run copy's test files. */
+export function findReproTest(
+  repoPath: string,
+  issueId: string
+): { name: string; file: string; text: string } | undefined {
+  const root = path.resolve(repoPath);
+  const marker = `repro-issue-${issueId}`;
+  const candidates = [...walkFiles(path.join(root, 'test')), ...walkFiles(root).filter((f) => /test/i.test(path.basename(f)))];
+  const seen = new Set<string>();
+  for (const file of candidates) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    if (!content.includes(marker)) continue;
+    const lines = content.split(/\r?\n/);
+    const start = lines.findIndex((l) => /(?:^|\s)(?:test|it)\s*\(/.test(l) && l.includes(marker));
+    if (start === -1) continue;
+    const block: string[] = [];
+    let depth = 0;
+    for (let i = start; i < lines.length && block.length < 60; i++) {
+      block.push(lines[i]);
+      for (const ch of lines[i]) {
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+      }
+      if (i > start && depth <= 0) break;
+    }
+    return { name: marker, file: path.relative(root, file).replace(/\\/g, '/'), text: block.join('\n') };
+  }
+  return undefined;
+}
 
 function formatSources(sources: SourceSnippet[]): string {
   return sources
@@ -251,8 +330,19 @@ function formatSources(sources: SourceSnippet[]): string {
     .join('\n\n');
 }
 
+export interface ProposeInput {
+  issue: Mandate;
+  rubric: RubricResult;
+  sources: SourceSnippet[];
+  memoryText?: string;
+  /** allowedPaths/deniedPaths read from foreman.policy.json at runtime by the caller. */
+  policy: { allowedPaths: string[]; deniedPaths: string[] };
+  /** The failing repro test, shown as READ ONLY EVIDENCE. */
+  reproTest?: { name: string; file: string; text: string };
+}
+
 export async function proposePatch(
-  input: { issue: Mandate; rubric: RubricResult; sources: SourceSnippet[]; memoryText?: string },
+  input: ProposeInput,
   runId: string,
   callModel: ProposeCallModel = defaultCallModel
 ): Promise<ProposeResult> {
@@ -269,6 +359,7 @@ export async function proposePatch(
         `Issue:\n${input.issue.title}\n\n${input.issue.summary}\n\n` +
         `Rubric criteria:\n${criteriaText}\n\n` +
         memorySection +
+        readOnlySection(input.policy, input.reproTest) +
         `Relevant source (authoritative; copy "search" verbatim from here):\n\n${formatSources(input.sources)}\n\n` +
         'Return the JSON edit list.',
     },
