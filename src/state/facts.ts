@@ -13,8 +13,20 @@ export type FactPayload =
   | { type: 'run_started'; runId: string; issueId: string }
   | { type: 'workspace_created'; baseCommit: string; branch: string; path: string }
   | { type: 'baseline_recorded'; exitCode: number; passed: number; failed: number; failingTests: string[] }
-  | { type: 'mandate_created' }
-  | { type: 'context_built' }
+  | {
+      type: 'mandate_created';
+      issueId?: string;
+      title?: string;
+      criteriaCount?: number;
+      hintedSymbols?: string[];
+      hintedPaths?: string[];
+    }
+  | {
+      type: 'context_built';
+      queryCount?: number;
+      findingCount?: number;
+      indexedSymbols?: number;
+    }
   | { type: 'patch_proposed'; attempt: number; diffHash: string }
   | { type: 'gate_result'; attempt: number; passed: boolean; failedRules: string[] }
   | { type: 'tests_result'; attempt: number; passed: boolean; failingTests: string[] }

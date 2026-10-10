@@ -1,14 +1,19 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { createWorkspace } from '../run/workspace.js';
 import { runTests } from '../run/tests.js';
 import { appendFact, readFacts } from '../state/facts.js';
 import { deriveStatus } from '../state/derive.js';
+import { loadMandate, type Mandate } from '../mandate/load.js';
+import { buildContext, type ContextBundle } from '../context/graph.js';
 import { withWorkflow, withStage, flushTelemetry, shutdownTelemetry } from '../telemetry/index.js';
 
 interface CliArgs {
   command?: string;
   issue?: string;
   setupOnly: boolean;
+  through?: string;
 }
 
 function parseArgs(args: string[]): CliArgs {
@@ -25,6 +30,9 @@ function parseArgs(args: string[]): CliArgs {
       i++;
     } else if (arg === '--setup-only') {
       result.setupOnly = true;
+    } else if (arg === '--through') {
+      result.through = args[i + 1];
+      i++;
     }
   }
 
@@ -35,12 +43,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const parsed = parseArgs(argv);
 
   if (parsed.command !== 'run' || !parsed.issue) {
-    console.error('Usage: foreman run --issue <n> [--setup-only]');
+    console.error('Usage: foreman run --issue <n> [--setup-only] [--through context]');
     process.exit(1);
   }
 
   const issueId = parsed.issue;
   const runId = `run-${Date.now()}`;
+  const shouldRunContext = !parsed.setupOnly && (parsed.through === undefined || parsed.through === 'context');
 
   const { traceId } = await withWorkflow(runId, issueId, async (_span, currentTraceId) => {
     // 1. Record run_started fact
@@ -92,11 +101,66 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       failingTests: baseline.failingTests,
     });
 
-    // 4. Derive status from facts
+    let mandate: Mandate | undefined;
+    let contextBundle: ContextBundle | undefined;
+
+    // 4. Load mandate & gather context unless --setup-only
+    if (shouldRunContext) {
+      mandate = await withStage(
+        'mandate_load',
+        'TOOL',
+        async (stageSpan) => {
+          const loaded = loadMandate(issueId);
+          stageSpan.setAttribute('foreman.mandate.title', loaded.title);
+          stageSpan.setAttribute('foreman.mandate.criteria_count', loaded.acceptanceCriteria.length);
+          return loaded;
+        },
+        {
+          'foreman.run_id': runId,
+          'foreman.issue_id': issueId,
+        }
+      );
+
+      appendFact(runId, {
+        type: 'mandate_created',
+        issueId,
+        title: mandate.title,
+        criteriaCount: mandate.acceptanceCriteria.length,
+        hintedSymbols: mandate.hintedSymbols,
+        hintedPaths: mandate.hintedPaths,
+      });
+
+      contextBundle = await withStage(
+        'graph_context',
+        'RETRIEVER',
+        async (stageSpan) => {
+          const ctx = buildContext(workspace.path, mandate!);
+          stageSpan.setAttribute('foreman.context.query_count', ctx.queriesRun.length);
+          stageSpan.setAttribute('foreman.context.finding_count', ctx.findings.length);
+          if (ctx.indexSummary) {
+            stageSpan.setAttribute('foreman.context.indexed_symbols', ctx.indexSummary.symbols);
+          }
+          return ctx;
+        },
+        {
+          'foreman.run_id': runId,
+          'foreman.issue_id': issueId,
+        }
+      );
+
+      appendFact(runId, {
+        type: 'context_built',
+        queryCount: contextBundle.queriesRun.length,
+        findingCount: contextBundle.findings.length,
+        indexedSymbols: contextBundle.indexSummary?.symbols ?? 0,
+      });
+    }
+
+    // 5. Derive status from facts
     const facts = readFacts(runId);
     const derivedStatus = deriveStatus(facts);
 
-    // 5. Print summary (strictly no emojis)
+    // 6. Print console summary (strictly no emojis)
     console.log('Foreman Run Summary');
     console.log('===================');
     console.log(`Run ID: ${runId}`);
@@ -112,18 +176,55 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     if (baseline.failingTests.length > 0) {
       console.log(`Failing Tests: ${baseline.failingTests.join(', ')}`);
     }
-    console.log(`Facts Count: ${facts.length}`);
 
-    return { workspace, baseline, derivedStatus };
+    if (mandate) {
+      console.log('\nMandate Summary');
+      console.log('---------------');
+      console.log(`Title: ${mandate.title}`);
+      console.log(`Summary: ${mandate.summary}`);
+      console.log(`Acceptance Criteria (${mandate.acceptanceCriteria.length}):`);
+      for (const c of mandate.acceptanceCriteria) {
+        console.log(`  - ${c}`);
+      }
+      if (mandate.hintedSymbols.length > 0) {
+        console.log(`Hinted Symbols: ${mandate.hintedSymbols.join(', ')}`);
+      }
+      if (mandate.hintedPaths.length > 0) {
+        console.log(`Hinted Paths: ${mandate.hintedPaths.join(', ')}`);
+      }
+    }
+
+    if (contextBundle) {
+      console.log('\nStructural Context Summary');
+      console.log('--------------------------');
+      if (contextBundle.indexSummary) {
+        console.log(
+          `Index: ${contextBundle.indexSummary.files} files, ${contextBundle.indexSummary.symbols} symbols, ${contextBundle.indexSummary.relations} relations (completeness: ${contextBundle.indexSummary.completeness})`
+        );
+      }
+      console.log(`Queries Run (${contextBundle.queriesRun.length}):`);
+      for (const q of contextBundle.queriesRun) {
+        console.log(`  > entire graph ${q}`);
+      }
+      console.log(`Findings (${contextBundle.findings.length}):`);
+      for (const f of contextBundle.findings.slice(0, 10)) {
+        console.log(`  [${f.kind}] ${f.symbol} (${f.file}): ${f.evidence.slice(0, 80)}`);
+      }
+      if (contextBundle.findings.length > 10) {
+        console.log(`  ... and ${contextBundle.findings.length - 10} more findings`);
+      }
+      console.log(`Notes: ${contextBundle.notes}`);
+    }
+
+    console.log(`\nFacts Count: ${facts.length}`);
+
+    return { workspace, baseline, mandate, contextBundle, derivedStatus };
   });
 
   // Flush and clean shutdown
   await flushTelemetry();
   await shutdownTelemetry();
 }
-
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 
 const isDirectRun =
   Boolean(process.argv[1]) &&

@@ -6,13 +6,15 @@
   "scripts": {
     "foreman": "tsx src/cli/index.ts",
     "test": "tsx --test test/**/*.test.ts",
-    "smoke:neatlogs": "tsx scripts/smoke-neatlogs.ts"
+    "smoke:neatlogs": "tsx scripts/smoke-neatlogs.ts",
+    "smoke:litellm": "tsx scripts/smoke-litellm.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "neatlogs": "^1.1.28"
+    "neatlogs": "^1.1.28",
+    "openai": "^7.32.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

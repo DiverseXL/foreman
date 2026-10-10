@@ -17,6 +17,8 @@ DiverseXL
 - 2026-10-10 10:46:26 +01:00 - Step 1: scaffold
 - 2026-10-10 11:40:31 +01:00 - Step 2: synthetic target repo and seeded benchmark issues
 - 2026-10-10 12:35:09 +01:00 - Step 3: run engine, append-only facts, derived status, workspace isolation, offline test runner, and neatlogs telemetry
+- 2026-10-10 13:12:54 +01:00 - Step 4: deterministic mandate parsing, entire-graph structural context retrieval, and telemetry spans
+- 2026-10-10 - Model router added. Sonnet for patch, Haiku for validate and cheap. LiteLLM base URL https://litellm.vision.aivar.app/v1. API key in .env only (LITELLM_API_KEY).
 
 # Entire evidence
 
