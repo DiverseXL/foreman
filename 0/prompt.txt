@@ -1,0 +1,26 @@
+STEP 3 of the Foreman build. Do only this step, then stop and wait.
+
+FIRST ACTION: run and report verbatim Get-Location, git rev-parse --show-toplevel, entire status, entire session list. If there is no active Entire session, say so clearly, then CONTINUE with the rest of the step. Do not try to fix Entire.
+
+Context: Foreman is a TypeScript CLI agent that fixes issues on a target repo. This step builds the run engine with NO model calls. Design rules: state is stored as append-only facts and status is derived from them; the model, when added later, never decides what is allowed.
+
+Rules:
+- No emojis. PowerShell-compatible commands. No model or network calls other than neatlogs export.
+- Never run git commit or git push in the Foreman repo. Stage with git add only, then print a proposed commit message. (Git commands inside the temporary run copies under runs/ are allowed.)
+- Never use --no-verify, change hooks, or kill processes. If anything hangs more than 30 seconds, stop and report.
+- Never print or read .env or any key. Runtime code may load it with process.loadEnvFile.
+- Do not guess any API or output format. For neatlogs, derive usage from node_modules/neatlogs/dist/index.d.ts and @opentelemetry/api types and quote the declarations you rely on. For test output, inspect real node:test output from this machine before writing a parser.
+- Use real timestamps (new Date() in code, Get-Date in logs).
+- Flag anything placeholder before writing it. In your final report list as FAILED anything retried or worked around.
+
+Build under src/:
+1. state/facts.ts: a discriminated union of fact types: run_started{runId,issueId}, workspace_created{baseCommit,branch,path}, baseline_recorded{exitCode,passed,failed,failingTests[]}, mandate_created, context_built, patch_proposed{attempt,diffHash}, gate_result{attempt,passed,failedRules[]}, tests_result{attempt,passed,failingTests[]}, validator_result{attempt,allCriteriaPass}, attempt_failed{attempt,failureClass:"blocked_policy"|"tests_failed"|"rejected_validator"|"error_transient"|"no_evidence"|"stuck_duplicate"}, budget_checked{exhausted}, needs_human{reason}, shipped{}. Every fact gets seq and ISO ts. appendFact writes one JSON line to runs/<runId>/facts.jsonl and never rewrites.
+2. state/derive.ts: a pure function deriveStatus(facts) returning one of: working, blocked_policy, tests_failing, rejected_validator, budget_exhausted, needs_human, ready_to_ship, shipped. Precedence: shipped, needs_human, budget_exhausted, ready_to_ship (latest attempt has a passing gate, passing tests, and allCriteriaPass), then by the failure of the latest attempt, else working. There is no status field anywhere.
+3. run/workspace.ts: copy fixtures/sample-repo (excluding node_modules) to runs/<runId>/repo, git init there with a LOCAL-only identity set inside that copy (flag that this identity is a throwaway), baseline commit, create branch foreman/issue-<n>, record the base commit. Make the tests runnable in the copy offline after setup; choose the simplest method that works and show evidence.
+4. run/tests.ts: run the target's test command in a directory with a timeout and return {exitCode,passed,failed,failingTests[],durationMs} parsed from machine-readable output; choose the reporter by inspecting real output, not by assumption.
+5. telemetry/index.ts: init neatlogs once from the environment, a withWorkflow helper that creates the root WORKFLOW trace for a run, and a withStage helper that creates a child span of a given kind. Attach run id, issue id and baseline counts as attributes only if the declared types support it, and show the declaration; otherwise report that it is unsupported.
+6. cli/index.ts and an npm script "foreman": command "foreman run --issue <n> --setup-only" creates the workspace, runs baseline tests, appends facts, prints the derived status and a summary, flushes and shuts down neatlogs.
+7. Unit tests with node:test for deriveStatus (one test per rule, including precedence) and appendFact (append-only, ordered seq).
+8. Add a dated hackathon.md Build log entry, stage everything.
+
+Verification with real output: (a) the unit tests, (b) a real run of: npm run foreman -- run --issue 1 --setup-only, with its full console output, (c) the contents of the produced facts.jsonl, (d) git log inside the run copy, (e) the baseline result in the facts: it must show 28 passed, 3 failed, and the three repro test names, (f) the neatlogs trace id plus the exact d.ts lines used, (g) git status, git diff --cached --stat, git check-ignore runs, and a search showing no key in staged files. List anything you could not verify. Stop and wait.

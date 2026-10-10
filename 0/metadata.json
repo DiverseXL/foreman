@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4JT40HZGG35HK6VBBDTQS3B",
+  "session_id": "d3f0ee28-d96f-48ef-9059-532406d1abca",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-10T11:45:47.6822423Z",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "hackathon.md",
+    "package.json",
+    "src/cli/index.ts",
+    "src/run/tests.ts",
+    "src/run/workspace.ts",
+    "src/state/derive.ts",
+    "src/state/facts.ts",
+    "src/telemetry/index.ts",
+    "test/derive.test.ts",
+    "test/facts.test.ts",
+    "tsconfig.json"
+  ],
+  "agent": "Antigravity",
+  "model": "",
+  "turn_id": "1cb00345fc99",
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-10T11:45:47.5619537Z",
+    "agent_lines": 862,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 862,
+    "total_lines_changed": 863,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
