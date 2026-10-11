@@ -1,0 +1,32 @@
+population,metric,value,n,unit,numerator,denominator,classification
+issue 1,success rate,0/5,5,shipped runs / runs,0,5,MEASURED
+issue 1,shipped-and-held-out-passed rate,0/5,5,runs,0,5,MEASURED
+issue 1,mean attempts per run,1.800,5,attempts/run,,,MEASURED
+issue 1,mean tokens per attempt,5603.222,9,tokens/attempt,50429,9,MEASURED
+issue 1,blended gateway cost per 1M tokens,2.185457,50429,USD/1M tokens,0.11021040000000001,50429,MEASURED
+issue 1,mean gateway cost per run,0.022042,5,USD/run,,,MEASURED
+issue 1,gateway cost per shipped fix,n/a,0,USD/shipped fix,,,MEASURED
+issue 1,mean wall seconds,42.130,4,seconds/run,,,MEASURED
+issue 2,success rate,1/10,10,shipped runs / runs,1,10,MEASURED
+issue 2,shipped-and-held-out-passed rate,1/10,10,runs,1,10,MEASURED
+issue 2,mean attempts per run,2.300,10,attempts/run,,,MEASURED
+issue 2,mean tokens per attempt,4800.478,23,tokens/attempt,110411,23,MEASURED
+issue 2,blended gateway cost per 1M tokens,2.606777,110411,USD/1M tokens,0.2878169,110411,MEASURED
+issue 2,mean gateway cost per run,0.028782,10,USD/run,,,MEASURED
+issue 2,gateway cost per shipped fix,0.014121,1,USD/shipped fix,,,MEASURED
+issue 2,mean wall seconds,27.253,8,seconds/run,,,MEASURED
+overall,success rate,1/15,15,shipped runs / runs,1,15,MEASURED
+overall,shipped-and-held-out-passed rate,1/15,15,runs,1,15,MEASURED
+overall,mean attempts per run,2.133,15,attempts/run,,,MEASURED
+overall,mean tokens per attempt,5026.250,32,tokens/attempt,160840,32,MEASURED
+overall,blended gateway cost per 1M tokens,2.474679,160840,USD/1M tokens,0.39802730000000003,160840,MEASURED
+overall,mean gateway cost per run,0.026535,15,USD/run,,,MEASURED
+overall,gateway cost per shipped fix,0.014121,1,USD/shipped fix,,,MEASURED
+overall,mean wall seconds,32.212,12,seconds/run,,,MEASURED
+business inputs,price per fix,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,fixes per customer per month,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,customers,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,fixed infrastructure cost,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,engineering hours saved per fix,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,hourly engineering cost,,,,,,"ASSUMPTION, NOT MEASURED"
+business inputs,starting cash,,,,,,"ASSUMPTION, NOT MEASURED"

@@ -38,7 +38,7 @@ export function deriveStatus(facts: readonly Fact[]): ForemanStatus {
   // Find latest attempt index
   let maxAttempt = -1;
   for (const fact of facts) {
-    if ('attempt' in fact && typeof fact.attempt === 'number') {
+    if (fact.type !== 'workspace_reset' && 'attempt' in fact && typeof fact.attempt === 'number') {
       if (fact.attempt > maxAttempt) {
         maxAttempt = fact.attempt;
       }

@@ -16,7 +16,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { appendFact, readFacts, type Fact, type AttemptFailureClass, type PatchSource } from '../state/facts.js';
 import { deriveStatus, type ForemanStatus } from '../state/derive.js';
-import { runTotals, type RunTotals } from '../model/index.js';
+import { runStageTotals, runTotals, type ModelCallStage, type RunTotals } from '../model/index.js';
 import type { RubricResult, RubricCriterion } from '../mandate/rubric.js';
 import type { PatchEdit, ApplyResult } from '../patch/propose.js';
 import type { ChangeSummary } from '../policy/changed.js';
@@ -43,7 +43,7 @@ export interface PatchProposal {
 
 export interface SupervisorEngine {
   /** Reset the run copy to the base commit (discards the previous attempt commit). */
-  reset(): void;
+  reset(): { head: string; cleanTree: boolean };
   /** Get a patch: the injected one on attempt 1 when provided, otherwise the model. */
   propose(input: { attempt: number; memoryText: string; injected?: PatchEdit[] }): Promise<PatchProposal>;
   apply(edits: PatchEdit[]): ApplyResult;
@@ -278,11 +278,15 @@ export function writeRunReport(
     outcome: ForemanStatus;
     attempts: number;
     noGraph?: boolean;
+    runsDir?: string;
   },
   facts: readonly Fact[],
   totals: RunTotals,
   wallMs: number
 ): void {
+  const derivedOutcome = deriveStatus(facts);
+  const stageTotals = runStageTotals(opts.runId, opts.runsDir);
+  const gatewayCostUsd = Object.values(stageTotals).reduce((sum, stage) => sum + stage.gatewayCostUsd, 0);
   const attemptNumbers = Array.from(new Set(facts.filter((f) => 'attempt' in f).map((f) => f.attempt as number))).sort(
     (a, b) => a - b
   );
@@ -300,6 +304,47 @@ export function writeRunReport(
     .filter((f) => f.type === 'gate_result')
     .flatMap((f) => (f.type === 'gate_result' ? f.skippedRules ?? [] : []));
   const holdoutFact = [...facts].reverse().find((f) => f.type === 'holdout_result');
+  const latestGate = [...facts].reverse().find((f) => f.type === 'gate_result');
+  const latestTests = [...facts].reverse().find((f) => f.type === 'tests_result');
+  const latestValidator = [...facts].reverse().find((f) => f.type === 'validator_result');
+  const workspaceFact = facts.find((f) => f.type === 'workspace_created');
+  const shippedFact = [...facts].reverse().find((f) => f.type === 'shipped');
+  const verdict =
+    derivedOutcome === 'shipped'
+      ? 'SHIPPED'
+      : derivedOutcome === 'blocked_policy'
+        ? 'BLOCKED BY POLICY'
+        : derivedOutcome === 'budget_exhausted'
+          ? 'BUDGET EXHAUSTED'
+          : derivedOutcome === 'patch_failed'
+            ? 'PATCH FAILED'
+            : 'NEEDS HUMAN';
+  const stageRows = (Object.entries(stageTotals) as [ModelCallStage, (typeof stageTotals)[ModelCallStage]][]).map(
+    ([stage, stageTotal]) =>
+      `| ${stage} | ${stageTotal.promptTokens} | ${stageTotal.completionTokens} | ${stageTotal.gatewayCostUsd.toFixed(6)} | ${stageTotal.callCount} |`
+  );
+  const proof = [
+    `- Gate result: ${latestGate && latestGate.type === 'gate_result' ? `${latestGate.passed ? 'passed' : 'failed'}; failed rules=${latestGate.failedRules.join(', ') || 'none'}` : 'n/a'}`,
+    `- Tests: ${latestTests && latestTests.type === 'tests_result' ? `targetPassed=${latestTests.targetPassed ?? 'n/a'}; regressions=${latestTests.regressions?.join(', ') || 'none'}` : 'n/a'}`,
+    `- Validator verdicts: ${
+      latestValidator && latestValidator.type === 'validator_result'
+        ? latestValidator.criteria?.map((criterion) => `${criterion.id}=${criterion.verdict} (${criterion.confidence})`).join('; ') || `allCriteriaPass=${latestValidator.allCriteriaPass}`
+        : 'n/a'
+    }`,
+    `- Holdout result: ${holdoutFact && holdoutFact.type === 'holdout_result' ? `${holdoutFact.passed ? 'passed' : 'failed'}; failing tests=${holdoutFact.failingTests.join(', ') || 'none'}` : 'n/a'}`,
+    `- Trace ID: ${opts.traceId}`,
+    `- Run ID: ${opts.runId}`,
+    `- Tokens: prompt=${totals.prompt}; completion=${totals.completion}; total=${totals.total}`,
+    `- Gateway cost: $${gatewayCostUsd.toFixed(6)} USD`,
+  ];
+  if (derivedOutcome === 'shipped') {
+    const commitSha = shippedFact && shippedFact.type === 'shipped' ? shippedFact.commitSha ?? 'unknown' : 'unknown';
+    const branch = workspaceFact && workspaceFact.type === 'workspace_created' ? workspaceFact.branch : 'unknown';
+    proof.unshift(
+      `- Branch commit: ${branch} @ ${commitSha}`,
+      `- Patch file: ${fs.existsSync(path.join(opts.runDir, 'proposed.patch')) ? 'proposed.patch' : 'missing'}; no pull request opened`
+    );
+  }
 
   const summaryRows: string[] = [
     '| Attempt | Injected | Patch source | Diff hash | Gate | Failed rules | targetPassed | Regressions | Escalated |',
@@ -393,9 +438,18 @@ export function writeRunReport(
   const lines = [
     `# Foreman Run Report: ${opts.runId}`,
     '',
+    ...(holdoutFact && holdoutFact.type === 'holdout_result' && !holdoutFact.passed ? ['# HELD-OUT CHECK FAILED', ''] : []),
+    '## Verdict',
+    '',
+    verdict,
+    '',
+    '### Proof',
+    '',
+    ...proof,
+    '',
     `Issue: ${opts.issueId} - ${opts.issueTitle}`,
-    `Outcome: ${opts.outcome}`,
-    `Derived status: ${opts.outcome}`,
+    `Outcome: ${derivedOutcome}`,
+    `Derived status: ${derivedOutcome}`,
     `Attempts: ${opts.attempts}`,
     `Injected first attempt: ${opts.injected ? 'YES' : 'no'}`,
     ...(opts.noGraph ? ['NO GRAPH MODE: enabled', `Skipped graph rules: ${Array.from(new Set(skippedRules)).join(', ') || 'none'}`] : []),
@@ -426,12 +480,19 @@ export function writeRunReport(
     `prompt tokens: ${totals.prompt}`,
     `completion tokens: ${totals.completion}`,
     `total tokens: ${totals.total}`,
-    `gateway cost (USD): $${totals.cost.toFixed(6)}`,
+    `gateway cost (USD): $${gatewayCostUsd.toFixed(6)}`,
+    `effective cost (USD): $${totals.cost.toFixed(6)}`,
     `wall time: ${(wallMs / 1000).toFixed(1)}s`,
+    '',
+    '## Model usage by stage (from this run\'s ledger lines)',
+    '',
+    '| Stage | Prompt tokens | Completion tokens | Gateway cost (USD) | Calls |',
+    '| --- | ---: | ---: | ---: | ---: |',
+    ...stageRows,
     '',
     '## Shipment',
     '',
-    opts.outcome === 'shipped'
+    derivedOutcome === 'shipped'
       ? 'The run branch in the run copy holds the shipped commit, and proposed.patch holds the same change. ' +
         'NO pull request was opened.'
       : 'Nothing was shipped.',
@@ -448,17 +509,21 @@ export function writeRunReport(
 
 export function writeEconomics(
   runDir: string,
-  opts: { runId: string; outcome: ForemanStatus; attempts: number },
+  opts: { runId: string; outcome: ForemanStatus; attempts: number; runsDir?: string },
   totals: RunTotals,
   wallMs: number
 ): void {
+  const stages = runStageTotals(opts.runId, opts.runsDir);
+  const gatewayCostUsd = Object.values(stages).reduce((sum, stage) => sum + stage.gatewayCostUsd, 0);
   const economics = {
     runId: opts.runId,
     attempts: opts.attempts,
     promptTokens: totals.prompt,
     completionTokens: totals.completion,
     totalTokens: totals.total,
-    gatewayCostUsd: Number(totals.cost.toFixed(6)),
+    gatewayCostUsd: Number(gatewayCostUsd.toFixed(6)),
+    effectiveCostUsd: Number(totals.cost.toFixed(6)),
+    stages,
     wallTimeMs: wallMs,
     outcome: opts.outcome,
   };
@@ -582,7 +647,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
       const injected = attempt === 1 ? firstAttemptPatch : undefined;
 
       const outcome = await instrument.runAttempt(attempt, async (setOutcome) => {
-        engine.reset();
+        const reset = engine.reset();
+        emit({ type: 'workspace_reset', attempt, baseCommit, cleanTree: reset.cleanTree });
+        if (reset.head !== baseCommit || !reset.cleanTree) {
+          finishNeedsHuman('workspace_dirty');
+          setOutcome('workspace_dirty');
+          return 'workspace_dirty' as const;
+        }
 
         // ----- Get a patch -----
         let proposal: PatchProposal;
@@ -893,7 +964,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
         }
 
         // ----- Success -----
-        emit({ type: 'shipped' });
+        emit({ type: 'shipped', commitSha: sha });
         writeArtifact(runDir, 'proposed.patch', diff + '\n');
         log(
           `Shipped: the run branch holds commit ${sha.slice(0, 12)} and proposed.patch holds the change. NO pull request was opened.`
@@ -905,6 +976,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
       });
 
       if (outcome === 'shipped') break;
+      if (outcome === 'workspace_dirty') break;
       if (outcome === 'stuck_duplicate') {
         finishNeedsHuman(
           `Attempt ${attempt} reproduced an earlier attempt's diff exactly (diffHash ${currentDuplicateHash.slice(0, 12)}); stopping instead of repeating a known-dead approach.`

@@ -25,10 +25,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 export type CostSource = 'gateway' | 'estimate' | 'none';
+export type ModelCallStage = 'rubric' | 'patch' | 'validate' | 'replay' | 'other';
 
 export interface LedgerEntry {
   ts: string;
   runId: string;
+  stage: ModelCallStage;
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -61,6 +63,13 @@ export interface ModelCallCosts {
   gatewayCostUsd?: number | null;
   keySpendUsd?: number | null;
   keyMaxBudgetUsd?: number | null;
+}
+
+export interface RunStageTotals {
+  promptTokens: number;
+  completionTokens: number;
+  gatewayCostUsd: number;
+  callCount: number;
 }
 
 interface StepBaseline {
@@ -324,6 +333,24 @@ export function runTotals(runId: string, runsDir = 'runs'): RunTotals {
   return { prompt, completion, total: prompt + completion, cost, keySpendUsd, keyMaxBudgetUsd };
 }
 
+/** Per-stage usage for a run, calculated only from that run's ledger lines. */
+export function runStageTotals(runId: string, runsDir = 'runs'): Record<ModelCallStage, RunStageTotals> {
+  const stages: ModelCallStage[] = ['rubric', 'patch', 'validate', 'replay', 'other'];
+  const totals = Object.fromEntries(
+    stages.map((stage) => [stage, { promptTokens: 0, completionTokens: 0, gatewayCostUsd: 0, callCount: 0 }])
+  ) as Record<ModelCallStage, RunStageTotals>;
+  const entries = readLedger(getLedgerPath(runsDir)).filter((entry) => entry.runId === runId);
+  for (const entry of entries) {
+    const stage = entry.stage ?? 'other';
+    const total = totals[stage];
+    total.promptTokens += entry.promptTokens;
+    total.completionTokens += entry.completionTokens;
+    total.gatewayCostUsd += entry.gatewayCostUsd ?? 0;
+    total.callCount++;
+  }
+  return totals;
+}
+
 /**
  * Records a model call. Always appends an entry so tokens and spend are tracked.
  * Refuses (throws) when:
@@ -334,6 +361,7 @@ export function runTotals(runId: string, runsDir = 'runs'): RunTotals {
  */
 export function recordModelCall(opts: {
   runId: string;
+  stage: ModelCallStage;
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -342,6 +370,7 @@ export function recordModelCall(opts: {
 } & ModelCallCosts): LedgerEntry {
   const {
     runId,
+    stage,
     model,
     promptTokens,
     completionTokens,
@@ -385,6 +414,7 @@ export function recordModelCall(opts: {
   const entry: LedgerEntry = {
     ts: new Date().toISOString(),
     runId,
+    stage,
     model,
     promptTokens,
     completionTokens,

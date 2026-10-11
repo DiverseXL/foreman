@@ -12,6 +12,7 @@ import {
   assertStepRunAllowed,
   keyBudgetExceeded,
   latestKeyBudget,
+  runStageTotals,
   RESERVE_USD,
   STEP_MAX_TOTAL_TOKENS,
   type LedgerEntry,
@@ -63,6 +64,7 @@ describe('ledger', () => {
     delete process.env.FOREMAN_BUDGET_USD;
     const entry = recordModelCall({
       runId: 'test-run',
+      stage: 'rubric',
       model: 'claude-haiku',
       promptTokens: 1000,
       completionTokens: 1000,
@@ -86,6 +88,7 @@ describe('ledger', () => {
       () =>
         recordModelCall({
           runId: 'test-run',
+          stage: 'patch',
           model: 'claude-haiku',
           promptTokens: 10,
           completionTokens: 10,
@@ -101,6 +104,7 @@ describe('ledger', () => {
     const entry: LedgerEntry = {
       ts: new Date(0).toISOString(),
       runId: 'test-run',
+      stage: 'other',
       model: 'claude-haiku',
       promptTokens: STEP_MAX_TOTAL_TOKENS,
       completionTokens: 0,
@@ -122,6 +126,7 @@ describe('ledger', () => {
       () =>
         recordModelCall({
           runId: 'test-run',
+          stage: 'validate',
           model: 'nova-pro',
           promptTokens: 7,
           completionTokens: 3,
@@ -143,6 +148,7 @@ describe('ledger', () => {
     // Fixed header fixture, as returned by the gateway.
     const entry = recordModelCall({
       runId: 'test-run',
+      stage: 'rubric',
       model: 'claude-haiku',
       promptTokens: 336,
       completionTokens: 170,
@@ -164,6 +170,7 @@ describe('ledger', () => {
     delete process.env.FOREMAN_BUDGET_USD;
     const entry = recordModelCall({
       runId: 'test-run',
+      stage: 'validate',
       model: 'nova-pro',
       promptTokens: 10,
       completionTokens: 5,
@@ -175,6 +182,52 @@ describe('ledger', () => {
     assert.equal(entry.costUsd, 0.0002);
   });
 
+  it('aggregates gateway usage by stage for only the requested run', () => {
+    delete process.env.FOREMAN_BUDGET_USD;
+    recordModelCall({
+      runId: 'stage-run',
+      stage: 'patch',
+      model: 'claude-haiku',
+      promptTokens: 12,
+      completionTokens: 5,
+      gatewayCostUsd: 0.0003,
+      runsDir: scratch,
+    });
+    recordModelCall({
+      runId: 'stage-run',
+      stage: 'validate',
+      model: 'nova-pro',
+      promptTokens: 20,
+      completionTokens: 8,
+      gatewayCostUsd: 0.0004,
+      runsDir: scratch,
+    });
+    recordModelCall({
+      runId: 'different-run',
+      stage: 'patch',
+      model: 'claude-haiku',
+      promptTokens: 100,
+      completionTokens: 100,
+      gatewayCostUsd: 1,
+      runsDir: scratch,
+    });
+
+    const stages = runStageTotals('stage-run', scratch);
+    assert.deepEqual(stages.patch, {
+      promptTokens: 12,
+      completionTokens: 5,
+      gatewayCostUsd: 0.0003,
+      callCount: 1,
+    });
+    assert.deepEqual(stages.validate, {
+      promptTokens: 20,
+      completionTokens: 8,
+      gatewayCostUsd: 0.0004,
+      callCount: 1,
+    });
+    assert.equal(stages.other.callCount, 0);
+  });
+
   it('refuses a call when reported key spend plus the reserve would exceed the max budget', () => {
     delete process.env.FOREMAN_BUDGET_USD;
     // 18.5 + 3 reserve = 21.5 > 20 max budget
@@ -182,6 +235,7 @@ describe('ledger', () => {
       () =>
         recordModelCall({
           runId: 'test-run',
+          stage: 'validate',
           model: 'claude-haiku',
           promptTokens: 10,
           completionTokens: 5,
@@ -231,6 +285,7 @@ describe('ledger', () => {
     const row: LedgerEntry = {
       ts: new Date(0).toISOString(),
       runId: 'step-run',
+      stage: 'other',
       model: 'claude-haiku',
       promptTokens: 100,
       completionTokens: 0,

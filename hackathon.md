@@ -26,6 +26,8 @@ DiverseXL
 - 2026-10-10 23:15:19 +01:00 - Step 9 verification update: the evidence-validation retry now resends each invalid criterion with its reason; the patch prompt requires runtime policy paths and read-only repro evidence; replay probes use the shared model ledger and never read .env. Added fixed-fixture prompt and token-cap preflight tests. `npm test`: 107 passing; `npx tsc --noEmit`: clean. The shipped issue-3 behavior check reproduces a one-cent overcharge for 1.1 (actual 1.11, expected 1.10). The saved ledger already exceeds its 200,000-token cap, so no further real model calls, full runs, or replay calls were made in this verification.
 - 2026-10-11 00:19:42 +01:00 - Step 10 verification: the baseline remains 97 ledger lines, 207,001 cumulative tokens, key spend $0.5117495, and 31 pre-existing run folders. Baseline-relative run/token/spend preflights, console teeing, no-graph context/gate reporting, and post-shipment held-out facts are implemented. Each held-out test passes against its temporary reference and fails against the unpatched fixture; `npm test` passes (111 tests) and `npx tsc --noEmit` is clean. Measurement and default-validator replay tools are prepared, but were not executed because previous real runs exceeded the 30-second stop limit; the result tables contain zero measurements and use the actual sample denominator (0/0). No Step 10 model calls were made.
 - 2026-10-11 08:44:16 +01:00 - Step 10b: added configurable child-process timeouts and output buffering, pure child-result classification with fixed-fixture tests, resumable/filtered/dry-run plan flags, and per-run progress summaries. `npm test` passes (115 tests), `npx tsc --noEmit` is clean, and dry-run prints the 15-item plan. No model calls or Foreman runs were made.
+- 2026-10-11 15:20:01 +01:00 - Step 10c: measurement results merge by run ID, can rebuild from post-baseline run folders, print child/derived outcomes, and report per-issue/mode aggregates with run details. `npm test`: 124 passing; `npx tsc --noEmit`: clean. Rebuild found 10 post-baseline runs and added 5 rows; no model calls or real Foreman runs were made.
+- 2026-10-11 09:19:56 +01:00 - Step 10b hardening: measurement children have configurable timeout/classification and resumable dry-run controls; ledger lines track model-call stage and emit sanitized usage summaries; reports show per-stage usage and fact-derived verdict/proof blocks; supervisor reset facts verify the base commit and clean tree. `npm test`: 120 passing; `npx tsc --noEmit`: clean; measurement dry-run printed the 15-item plan. No model calls or real Foreman runs were made.
 - 2026-10-10 20:50:08 +01:00 - Step 7 verification and fix: real runs against the sample repo (issue 2 shipped in 1 attempt; issue 1 and the injected-first-attempt issue 3 stopped at needs_human after the adversarial validator returned an "unclear" verdict under the 0.7 confidence floor and the retry loop then hit apply_failed). Root cause of the failing retries: the isolated run copy inherited the host's core.autocrlf=true, so `git reset --hard` materialised CRLF working-tree files while the patch model emits LF newlines, breaking every multi-line "search" string on attempts 2+. Pinned the run copy to LF (core.autocrlf=false, core.eol=lf) and made applyEdits line-ending tolerant, with regression tests (npm test 81 passing, tsc clean). Added scripts/probe-nova.ts (tiny nova-pro json_schema pre-flight) and persisted the raw proposal on apply failure (attempt-<n>-proposal.json).
 - 2026-10-10 16:11:42 +01:00 - Step 5: first real model calls. Gateway pre-flight (tiny calls to claude-haiku and claude-sonnet-4.6, raw HTTP cost headers, structured JSON support verified via response_format json_schema). Model-built rubric (claude-haiku) with schema validation, structured patch proposal (claude-sonnet-4.6) applied under an exact-once rule, git diff hashing, target tests, per-run artifacts (mandate.json, context.json, graph-raw/), and a fail-closed cost/token ledger (src/model/ledger.ts). Prices in prices.json are ESTIMATES; models with null prices are refused.
 
@@ -94,4 +96,17 @@ Counts: 31 run folders; 4 shipped; 3 model-only shipped of 31 total runs.
 
 # Submission
 
-Pending submission details.
+## Submission checklist
+
+- [x] Public repository with dated commits: [DiverseXL/foreman](https://github.com/DiverseXL/foreman).
+- [ ] Demo video covering all three tools.
+- [ ] Before-and-after neatlogs evidence.
+- [x] Failure-recovery run: [issue 3 injected-first-attempt evidence](docs/evidence/run-issue-3-injected-first-attempt-shipped/README.md).
+- [x] Entire checkpoint link and ID: [checkpoint 01M4K3QGW1D9S183TNZFEJ1KA4](https://entire.io/gh/DiverseXL/foreman/commit/54dd8af1a84a53a5b662a22f24b089bd852e7ad4).
+- [ ] cfo.ai plan and human-provided share link/export.
+- [ ] X post quoting the official post.
+
+## Build log
+
+- 2026-10-11 16:05:41 +01:00 - Step 11: added offline measured-economics and before/after generators, fact-and-ledger-only run receipt rendering, evidence index and tool provenance, and the submission checklist. No model calls or Foreman runs were made.
+- 2026-10-11 17:12:49 +01:00 - Step 12a: vetted scule, pathe, ufo, and defu from full-history clones; ran direct Vitest suites, mined fix/bug history, and experimentally verified three scule regressions against their parent commits. No model calls or Foreman runs were made.

@@ -325,6 +325,7 @@ async function defaultCallModel(
     messages,
     { maxTokens: 1500, responseFormat: jsonSchemaResponseFormat(schemaName, pruneSchemaForWire(schema)) },
     runId,
+    'validate',
     'validate'
   );
 }

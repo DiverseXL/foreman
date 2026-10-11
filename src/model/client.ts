@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { modelFor } from "./router.js";
-import { assertCallAllowed, recordModelCall, STEP_MAX_COMPLETION_TOKENS_PER_CALL } from "./ledger.js";
+import { assertCallAllowed, recordModelCall, STEP_MAX_COMPLETION_TOKENS_PER_CALL, type ModelCallStage } from "./ledger.js";
 import type { ChatMessage, ModelCallResult, ModelTask } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://litellm.vision.aivar.app/v1";
@@ -59,8 +59,9 @@ export async function complete(
   messages: ChatMessage[],
   options?: CompleteOptions,
   runId?: string,
+  stage: ModelCallStage = 'other',
 ): Promise<ModelCallResult> {
-  return completeWith(modelFor(task), messages, options, runId, task);
+  return completeWith(modelFor(task), messages, options, runId, task, stage);
 }
 
 /**
@@ -73,6 +74,7 @@ export async function completeWith(
   options?: CompleteOptions,
   runId?: string,
   task: ModelTask = 'validate',
+  stage: ModelCallStage = 'other',
 ): Promise<ModelCallResult> {
   const client = getClient();
 
@@ -114,14 +116,19 @@ export async function completeWith(
     totalTokens: response.usage?.total_tokens ?? (promptTokens + completionTokens),
   };
 
+  const gatewayCostUsd = headerValue('x-litellm-response-cost');
+  console.log(
+    `[model] stage=${stage} model=${response.model || model} prompt=${promptTokens} completion=${completionTokens} cost_usd=${gatewayCostUsd ?? 'n/a'} source=gateway`
+  );
   // Record in the ledger using gateway-reported cost when available.
   if (runId) {
     recordModelCall({
       runId,
+      stage,
       model,
       promptTokens,
       completionTokens,
-      gatewayCostUsd: headerValue('x-litellm-response-cost'),
+      gatewayCostUsd,
       keySpendUsd: headerValue('x-litellm-key-spend'),
       keyMaxBudgetUsd: headerValue('x-litellm-key-max-budget'),
     });

@@ -15,6 +15,7 @@ export type AttemptFailureClass =
 export type FactPayload =
   | { type: 'run_started'; runId: string; issueId: string }
   | { type: 'workspace_created'; baseCommit: string; branch: string; path: string }
+  | { type: 'workspace_reset'; attempt: number; baseCommit: string; cleanTree: boolean }
   | { type: 'baseline_recorded'; exitCode: number; passed: number; failed: number; failingTests: string[] }
   | {
       type: 'mandate_created';
@@ -95,7 +96,7 @@ export type FactPayload =
   | { type: 'budget_checked'; exhausted: boolean }
   | { type: 'needs_human'; reason: string }
   | { type: 'holdout_result'; issueId: string; passed: boolean; failingTests: string[] }
-  | { type: 'shipped' };
+  | { type: 'shipped'; commitSha?: string };
 
 export type Fact = FactPayload & {
   seq: number;

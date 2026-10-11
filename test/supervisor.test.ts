@@ -88,7 +88,7 @@ function makeHarness(engineOverrides: Partial<SupervisorEngine> = {}): Harness {
   const runDir = path.join(runsDir, runId);
 
   const engine: SupervisorEngine = {
-    reset: () => {},
+    reset: () => ({ head: 'base', cleanTree: true }),
     propose: async () => ({ edits: [{ file: 'src/rounding.ts', search: 'a', replace: 'b' }], model: 'fake', patchSource: 'model' }),
     apply: () => ({ ok: true, applied: [{ file: 'src/rounding.ts', replacedChars: 1 }] }),
     commit: () => 'sha-fixed',
@@ -154,7 +154,50 @@ describe('supervisor attempt loop', () => {
     assert.equal(memorySeen[0], '');
     assert.match(memorySeen[1], /Attempt 1 failed \(class: blocked_policy\)/);
     assert.match(memorySeen[1], /blast_radius: x=19/);
+    assert.deepEqual(
+      h.facts().filter((fact) => fact.type === 'workspace_reset').map((fact) => fact.attempt),
+      [1, 2]
+    );
     assert.equal(deriveStatus(h.facts()), 'shipped');
+  });
+
+  it('records an invalid reset and stops before proposing a patch', async () => {
+    let proposeCalls = 0;
+    const h = makeHarness({
+      reset: () => ({ head: 'unexpected-base', cleanTree: true }),
+      propose: async () => {
+        proposeCalls++;
+        throw new Error('must not propose from an unverified workspace');
+      },
+    });
+
+    const outcome = await runSupervisor(h.options());
+    const facts = h.facts();
+    const reset = facts.find((fact) => fact.type === 'workspace_reset');
+    assert.equal(outcome.status, 'needs_human');
+    assert.equal(proposeCalls, 0);
+    assert.ok(reset && reset.type === 'workspace_reset');
+    assert.equal(reset.baseCommit, 'base');
+    assert.equal(reset.cleanTree, true);
+    assert.ok(facts.some((fact) => fact.type === 'needs_human' && fact.reason === 'workspace_dirty'));
+  });
+
+  it('records a dirty worktree and stops even when HEAD is at the base', async () => {
+    let proposeCalls = 0;
+    const h = makeHarness({
+      reset: () => ({ head: 'base', cleanTree: false }),
+      propose: async () => {
+        proposeCalls++;
+        throw new Error('must not propose from a dirty workspace');
+      },
+    });
+
+    const outcome = await runSupervisor(h.options());
+    const reset = h.facts().find((fact) => fact.type === 'workspace_reset');
+    assert.equal(outcome.status, 'needs_human');
+    assert.equal(proposeCalls, 0);
+    assert.ok(reset && reset.type === 'workspace_reset');
+    assert.equal(reset.cleanTree, false);
   });
 
   it('three failures end in needs_human with a NEEDS_HUMAN.md', async () => {

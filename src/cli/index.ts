@@ -8,6 +8,7 @@ import {
   gitDiffRange,
   gitShowFile,
   resetToBase,
+  verifyWorkspaceReset,
   type WorkspaceResult,
 } from '../run/workspace.js';
 import { parseTestOutput, runTests, type TestRunResult } from '../run/tests.js';
@@ -388,7 +389,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         }
 
         const engine: SupervisorEngine = {
-          reset: () => resetToBase(workspace.path, workspace.baseCommit),
+          reset: () => {
+            resetToBase(workspace.path, workspace.baseCommit);
+            return verifyWorkspaceReset(workspace.path);
+          },
           propose: async ({ attempt, memoryText, injected }) => {
             if (injected) {
               return { edits: injected, model: 'injected', patchSource: 'injected' as PatchSource };
@@ -545,12 +549,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
               outcome: status,
               attempts: outcome.attempts,
               noGraph: parsed.noGraph,
+              runsDir: 'runs',
             },
             facts,
             totals,
             wallMs
           );
-          writeEconomics(runDir, { runId, outcome: status, attempts: outcome.attempts }, totals, wallMs);
+          writeEconomics(runDir, { runId, outcome: status, attempts: outcome.attempts, runsDir: 'runs' }, totals, wallMs);
         } catch (err) {
           stoppedReason = err instanceof Error ? err.message : String(err);
         }

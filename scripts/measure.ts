@@ -23,6 +23,35 @@ export interface ChildResult {
   timedOut: boolean;
 }
 
+export interface MeasurementRow {
+  issue: string;
+  mode: string;
+  runId: string;
+  status: 'completed' | 'timed_out';
+  exitCode: number | null;
+  derivedStatus: string;
+  attempts: number;
+  testsProtectedFailed: boolean;
+  tokens: number;
+  gatewayCostUsd: number | null;
+  wallSeconds: number | null;
+  traceId: string | null;
+  holdoutResult: 'passed' | 'failed' | 'n/a';
+}
+
+export interface ResultAggregate {
+  issue: string;
+  mode: 'graph' | 'no-graph' | 'unknown';
+  n: number;
+  shipped: number;
+  shippedAndHeldoutPassed: number;
+  testsProtectedFailed: number;
+  meanAttempts: string;
+  meanTokens: string;
+  meanGatewayCostUsd: string;
+  rows: MeasurementRow[];
+}
+
 const transientFailurePattern =
   /429|rate limit|timed out|timeout|socket hang up|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|temporarily unavailable|bad gateway|service unavailable/i;
 
@@ -37,26 +66,10 @@ export function classifyChild(child: ChildResult): ChildStatus {
   return 'crashed';
 }
 
-interface MeasurementRow {
-  issue: string;
-  mode: 'graph' | 'no-graph';
-  runId: string;
-  status: 'completed' | 'timed_out';
-  exitCode: number | null;
-  derivedStatus: string;
-  attempts: number;
-  testsProtectedFailed: boolean;
-  tokens: number;
-  gatewayCostUsd: number | null;
-  wallSeconds: number | null;
-  traceId: string | null;
-  holdoutResult: 'passed' | 'failed' | 'n/a';
-}
-
 const root = process.cwd();
 const baselinePath = path.resolve('.foreman-work', 'step10-start.json');
 const resultsDir = path.resolve('docs', 'evidence', 'measurements');
-const rows: MeasurementRow[] = [];
+let rows: MeasurementRow[] = [];
 const plan = [
   ...['1', '2', '3'].flatMap((issue) => Array.from({ length: 3 }, () => ({ issue, mode: 'graph' as const }))),
   ...['1', '2', '3'].flatMap((issue) => Array.from({ length: 2 }, () => ({ issue, mode: 'no-graph' as const }))),
@@ -74,65 +87,129 @@ function runFolders(): string[] {
     : [];
 }
 
-function writeResults(): void {
+export function mergeRows(existing: readonly MeasurementRow[], additions: readonly MeasurementRow[]): MeasurementRow[] {
+  const merged = new Map<string, MeasurementRow>();
+  for (const row of existing) merged.set(row.runId, row);
+  for (const row of additions) {
+    if (!merged.has(row.runId)) merged.set(row.runId, row);
+  }
+  return Array.from(merged.values());
+}
+
+function loadExistingRows(): MeasurementRow[] {
+  const file = path.join(resultsDir, 'results.json');
+  if (!fs.existsSync(file)) return [];
+  const value = readJson<unknown>(file);
+  if (!Array.isArray(value)) throw new Error(`Measurement results must be an array: ${file}`);
+  return value as MeasurementRow[];
+}
+
+function writeResults(additions: readonly MeasurementRow[] = []): void {
   fs.mkdirSync(resultsDir, { recursive: true });
+  rows = mergeRows(loadExistingRows(), mergeRows(rows, additions));
   fs.writeFileSync(path.join(resultsDir, 'results.json'), JSON.stringify(rows, null, 2) + '\n', 'utf-8');
   fs.writeFileSync(path.join(resultsDir, 'results.md'), renderMarkdown(), 'utf-8');
 }
 
-function formatMean(values: number[], digits = 2): string {
+export function formatFinishedLine(
+  index: number,
+  total: number,
+  child: ChildStatus,
+  row: Pick<MeasurementRow, 'derivedStatus' | 'attempts' | 'holdoutResult' | 'tokens'> | undefined,
+  elapsedSeconds: string
+): string {
+  return `Finished ${index}/${total} child=${child} derived=${row?.derivedStatus ?? 'n/a'} attempts=${row?.attempts ?? 0} holdout=${row?.holdoutResult ?? 'n/a'} tokens=${row?.tokens ?? 0} elapsed=${elapsedSeconds}s`;
+}
+
+function mean(values: number[], digits: number): string {
   return values.length === 0
     ? 'n/a'
     : (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(digits);
 }
 
+export function aggregateResults(rows: readonly MeasurementRow[]): ResultAggregate[] {
+  const issues = Array.from(new Set(['1', '2', '3', ...rows.map((row) => row.issue)])).sort(
+    (left, right) => left.localeCompare(right, undefined, { numeric: true })
+  );
+  const modes = ['graph', 'no-graph', 'unknown'] as const;
+  return issues.flatMap((issue) =>
+    modes.map((mode) => {
+      const group = rows.filter((row) => row.issue === issue && row.mode === mode);
+      const costs = group.flatMap((row) => (row.gatewayCostUsd === null ? [] : [row.gatewayCostUsd]));
+      return {
+        issue,
+        mode,
+        n: group.length,
+        shipped: group.filter((row) => row.derivedStatus === 'shipped').length,
+        shippedAndHeldoutPassed: group.filter(
+          (row) => row.derivedStatus === 'shipped' && row.holdoutResult === 'passed'
+        ).length,
+        testsProtectedFailed: group.filter((row) => row.testsProtectedFailed).length,
+        meanAttempts: mean(group.map((row) => row.attempts), 2),
+        meanTokens: mean(group.map((row) => row.tokens), 0),
+        meanGatewayCostUsd: mean(costs, 6),
+        rows: group,
+      };
+    })
+  );
+}
+
+export function runsAfterBaseline(currentRunIds: readonly string[], baselineRunIds: readonly string[]): string[] {
+  const baseline = new Set(baselineRunIds);
+  return currentRunIds.filter((runId) => !baseline.has(runId)).sort((a, b) => a.localeCompare(b));
+}
+
 function renderMarkdown(): string {
+  const aggregates = aggregateResults(rows);
   const sections: string[] = [
     '# Step 10 measurements',
     '',
     'Sample sizes are small; differences are not statistically meaningful.',
     '',
-    '| Issue | Mode | Shipped k/n | Shipped and held-out passed k/n | Mean attempts | Mean tokens | Mean gateway cost (USD) |',
-    '| --- | --- | ---: | ---: | ---: | ---: | ---: |',
+    '| Issue | Mode | n | Shipped k/n | Shipped and held-out passed k/n | tests_protected failed k/n | Mean attempts | Mean tokens | Mean gateway cost (USD) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
-  for (const issue of ['1', '2', '3']) {
-    for (const mode of ['graph', 'no-graph'] as const) {
-      const group = rows.filter((row) => row.issue === issue && row.mode === mode);
-      const sampleSize = group.length;
-      const shipped = group.filter((row) => row.derivedStatus === 'shipped').length;
-      const shippedHeldout = group.filter(
-        (row) => row.derivedStatus === 'shipped' && row.holdoutResult === 'passed'
-      ).length;
-      const costs = group.flatMap((row) => (row.gatewayCostUsd === null ? [] : [row.gatewayCostUsd]));
-      sections.push(
-        `| ${issue} | ${mode} | ${shipped}/${sampleSize} | ${shippedHeldout}/${sampleSize} | ${formatMean(group.map((r) => r.attempts))} | ${formatMean(group.map((r) => r.tokens), 0)} | ${formatMean(costs, 6)} |`
-      );
-    }
+  for (const aggregate of aggregates) {
+    sections.push(
+      `| ${aggregate.issue} | ${aggregate.mode} | ${aggregate.n} | ${aggregate.shipped}/${aggregate.n} | ${aggregate.shippedAndHeldoutPassed}/${aggregate.n} | ${aggregate.testsProtectedFailed}/${aggregate.n} | ${aggregate.meanAttempts} | ${aggregate.meanTokens} | ${aggregate.meanGatewayCostUsd} |`
+    );
   }
   if (rows.length === 0) sections.push('', 'No measurement runs have been recorded.');
+  sections.push(
+    '',
+    '## Runs',
+    '',
+    '| Run ID | Issue | Mode | Outcome | Attempts | Holdout | Tests protected failed | Tokens | Gateway cost (USD) | Wall seconds | Trace ID |',
+    '| --- | --- | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |'
+  );
+  for (const row of rows) {
+    sections.push(
+      `| ${row.runId} | ${row.issue} | ${row.mode} | ${row.derivedStatus} | ${row.attempts} | ${row.holdoutResult} | ${row.testsProtectedFailed} | ${row.tokens} | ${row.gatewayCostUsd?.toFixed(6) ?? 'n/a'} | ${row.wallSeconds?.toFixed(2) ?? 'n/a'} | ${row.traceId ?? 'n/a'} |`
+    );
+  }
   if (stoppedReason) sections.push('', `Stopped early: ${stoppedReason}`);
   return sections.join('\n') + '\n';
 }
 
-function collectRow(
-  runId: string,
-  issue: string,
-  mode: 'graph' | 'no-graph'
-): Omit<MeasurementRow, 'status' | 'exitCode'> {
-  const runDir = path.join('runs', runId);
-  const facts = fs
-    .readFileSync(path.join(runDir, 'facts.jsonl'), 'utf-8')
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as Fact);
-  const ledger = fs
-    .readFileSync(path.join('runs', 'ledger.jsonl'), 'utf-8')
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as { runId: string; promptTokens: number; completionTokens: number; gatewayCostUsd: number | null })
-    .filter((entry) => entry.runId === runId);
+export function collectRow(runId: string, runsDir = 'runs'): Omit<MeasurementRow, 'status' | 'exitCode'> {
+  const runDir = path.join(runsDir, runId);
+  const factsPath = path.join(runDir, 'facts.jsonl');
+  const facts: Fact[] = fs.existsSync(factsPath)
+    ? fs.readFileSync(factsPath, 'utf-8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as Fact)
+    : [];
+  const ledgerPath = path.join(runsDir, 'ledger.jsonl');
+  const ledger = fs.existsSync(ledgerPath)
+    ? fs
+        .readFileSync(ledgerPath, 'utf-8')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { runId: string; promptTokens: number; completionTokens: number; gatewayCostUsd: number | null })
+        .filter((entry) => entry.runId === runId)
+    : [];
   const gates = fs.readdirSync(runDir).filter((name) => /^gate-\d+\.json$/.test(name));
-  const testsProtectedFailed = gates.some((name) => {
+  const testsProtectedFailed = facts.some(
+    (fact) => fact.type === 'gate_result' && fact.failedRules.includes('tests_protected')
+  ) || gates.some((name) => {
     const gate = readJson<{ rules: { ruleId: string; passed: boolean; skipped?: boolean }[] }>(path.join(runDir, name));
     return gate.rules.some((rule) => rule.ruleId === 'tests_protected' && !rule.passed && !rule.skipped);
   });
@@ -141,6 +218,22 @@ function collectRow(
   const consolePath = path.join(runDir, 'console.log');
   const report = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, 'utf-8') : '';
   const consoleLog = fs.existsSync(consolePath) ? fs.readFileSync(consolePath, 'utf-8') : '';
+  const runStarted = facts.find((fact) => fact.type === 'run_started');
+  const modeFact = facts.find((fact) => {
+    const fields = fact as Fact & { mode?: unknown; noGraph?: unknown; graphMode?: unknown };
+    return fields.mode !== undefined || fields.noGraph !== undefined || fields.graphMode !== undefined;
+  }) as (Fact & { mode?: unknown; noGraph?: unknown; graphMode?: unknown }) | undefined;
+  const modeFromFacts =
+    modeFact?.mode === 'graph' || modeFact?.mode === 'no-graph' || modeFact?.mode === 'unknown'
+      ? modeFact.mode
+      : modeFact?.noGraph === true || modeFact?.graphMode === 'no-graph'
+        ? 'no-graph'
+        : modeFact?.noGraph === false || modeFact?.graphMode === 'graph'
+          ? 'graph'
+          : 'unknown';
+  const mode = /NO GRAPH MODE/.test(consoleLog)
+    ? 'no-graph'
+    : modeFromFacts;
   const economicsPath = path.join(runDir, 'economics.json');
   const economics = fs.existsSync(economicsPath) ? readJson<{ wallTimeMs?: number }>(economicsPath) : {};
   const traceId =
@@ -148,7 +241,7 @@ function collectRow(
   const attempts = Math.max(0, ...facts.flatMap((fact) => ('attempt' in fact && typeof fact.attempt === 'number' ? [fact.attempt] : [])));
   const gatewayCosts = ledger.flatMap((entry) => (entry.gatewayCostUsd === null ? [] : [entry.gatewayCostUsd]));
   return {
-    issue,
+    issue: runStarted?.type === 'run_started' ? runStarted.issueId : 'unknown',
     mode,
     runId,
     derivedStatus: deriveStatus(facts),
@@ -162,15 +255,34 @@ function collectRow(
   };
 }
 
+export function rebuildRows(runsDir: string, baselineRunIds: readonly string[]): MeasurementRow[] {
+  return runsAfterBaseline(
+    fs.existsSync(runsDir)
+      ? fs.readdirSync(runsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && entry.name.startsWith('run-'))
+          .map((entry) => entry.name)
+      : [],
+    baselineRunIds
+  ).map((runId) => ({
+    ...collectRow(runId, runsDir),
+    status: 'completed',
+    exitCode: null,
+  }));
+}
+
 async function main(): Promise<void> {
+  rows = loadExistingRows();
   const args = process.argv.slice(2);
   let dryRun = false;
+  let rebuildFromRuns = false;
   let startAt = 0;
   let onlyIssue: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--dry-run') {
       dryRun = true;
+    } else if (arg === '--rebuild-from-runs') {
+      rebuildFromRuns = true;
     } else if (arg === '--start-at' || arg === '--only-issue') {
       const value = args[++index];
       if (value === undefined || !/^\d+$/.test(value)) {
@@ -203,6 +315,22 @@ async function main(): Promise<void> {
   if (!fs.existsSync(baselinePath)) throw new Error(`Step 10 baseline missing: ${baselinePath}`);
   process.env.FOREMAN_STEP_BASELINE = baselinePath;
   process.env.FOREMAN_STEP_TOKEN_CAP ??= '260000';
+  if (rebuildFromRuns) {
+    const baseline = readJson<{ runFolders: string[] }>(baselinePath);
+    if (!Array.isArray(baseline.runFolders) || baseline.runFolders.some((folder) => typeof folder !== 'string')) {
+      throw new Error('Step 10 baseline must contain a runFolders list.');
+    }
+    const foundRows = rebuildRows('runs', baseline.runFolders);
+    const existingIds = new Set(rows.map((row) => row.runId));
+    const addedRows = foundRows.filter((row) => !existingIds.has(row.runId));
+    console.log(`Rebuild found ${foundRows.length} post-baseline run(s); added ${addedRows.length} new row(s).`);
+    for (const row of foundRows) {
+      console.log(`Found ${row.runId}${existingIds.has(row.runId) ? ' (already recorded)' : ' (added)'}`);
+    }
+    writeResults(addedRows);
+    console.log(fs.readFileSync(path.join(resultsDir, 'results.md'), 'utf-8'));
+    return;
+  }
   if (args.includes('--initialize-only')) {
     writeResults();
     console.log('Initialized empty measurement results; no runs or model calls were made.');
@@ -250,17 +378,16 @@ async function main(): Promise<void> {
     let row: MeasurementRow | undefined;
     if (runId && (childStatus === 'completed' || childStatus === 'timed_out')) {
       row = {
-        ...collectRow(runId, item.issue, item.mode),
+        ...collectRow(runId),
+        issue: item.issue,
+        mode: item.mode,
         status: childStatus,
         exitCode: child.status,
       };
-      rows.push(row);
-      writeResults();
+      writeResults([row]);
     }
     const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(2);
-    console.log(
-      `Finished ${index + 1}/${selectedPlan.length} status=${childStatus} attempts=${row?.attempts ?? 0} tokens=${row?.tokens ?? 0} elapsed=${elapsedSeconds}s`
-    );
+    console.log(formatFinishedLine(index + 1, selectedPlan.length, childStatus, row, elapsedSeconds));
 
     if (childStatus === 'transient') {
       consecutiveTransientFailures++;

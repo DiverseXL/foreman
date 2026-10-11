@@ -127,7 +127,8 @@ function boundedModel(model: string): ValidatorCallModel {
       messages,
       { maxTokens: 1500, responseFormat: jsonSchemaResponseFormat(schemaName, pruneSchemaForWire(schema)) },
       runId,
-      'validate'
+      'validate',
+      'replay'
     );
   };
 }

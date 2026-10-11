@@ -16,6 +16,7 @@ export {
   latestKeyBudget,
   recordModelCall,
   runTotals,
+  runStageTotals,
   RESERVE_USD,
   STEP_MAX_COMPLETION_TOKENS_PER_CALL,
   STEP_MAX_PATCH_ATTEMPTS,
@@ -25,4 +26,4 @@ export {
   stepKeySpendGrowth,
   stepRunCount,
 } from "./ledger.js";
-export type { CostSource, LedgerEntry, ModelCallCosts, PriceConfig, RunTotals } from "./ledger.js";
+export type { CostSource, LedgerEntry, ModelCallCosts, ModelCallStage, PriceConfig, RunStageTotals, RunTotals } from "./ledger.js";

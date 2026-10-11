@@ -213,7 +213,8 @@ async function defaultCallModel(
     'validate',
     messages,
     { maxTokens: 800, responseFormat: jsonSchemaResponseFormat(schemaName, pruneSchemaForWire(schema)) },
-    runId
+    runId,
+    'rubric'
   );
 }
 

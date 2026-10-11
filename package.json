@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "foreman": "tsx src/cli/index.ts",
-    "test": "tsx --test test/**/*.test.ts",
+    "test": "tsx --test test/**/*.test.ts scripts/*.test.ts",
+    "economics": "tsx scripts/export-economics.ts",
+    "improvements": "tsx scripts/build-improvements.ts",
+    "render": "tsx scripts/render-run.ts",
     "smoke:neatlogs": "tsx scripts/smoke-neatlogs.ts",
     "smoke:litellm": "tsx scripts/smoke-litellm.ts"
   },

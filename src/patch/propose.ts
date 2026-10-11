@@ -236,7 +236,8 @@ async function defaultCallModel(
     'patch',
     messages,
     { maxTokens: 4000, responseFormat: jsonSchemaResponseFormat(schemaName, pruneSchemaForWire(schema)) },
-    runId
+    runId,
+    'patch'
   );
 }
 

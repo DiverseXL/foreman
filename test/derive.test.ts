@@ -194,4 +194,13 @@ describe('deriveStatus pure function', () => {
     ];
     assert.equal(deriveStatus(facts), 'ready_to_ship');
   });
+
+  it('workspace reset facts do not replace the latest completed attempt status', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'gate_result', attempt: 1, passed: false, failedRules: ['secrets'] },
+      { seq: 2, ts: '2026-10-10T10:00:01Z', type: 'attempt_failed', attempt: 1, failureClass: 'blocked_policy' },
+      { seq: 3, ts: '2026-10-10T10:00:02Z', type: 'workspace_reset', attempt: 2, baseCommit: 'base', cleanTree: true },
+    ];
+    assert.equal(deriveStatus(facts), 'blocked_policy');
+  });
 });

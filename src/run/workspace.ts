@@ -39,6 +39,12 @@ export function resetToBase(repoPath: string, baseCommit: string): void {
   execSync('git clean -fd', { cwd: repoPath, stdio: 'pipe' });
 }
 
+export function verifyWorkspaceReset(repoPath: string): { head: string; cleanTree: boolean } {
+  const head = execSync('git rev-parse HEAD', { cwd: repoPath, stdio: 'pipe' }).toString('utf-8').trim();
+  const status = execSync('git status --porcelain', { cwd: repoPath, stdio: 'pipe' }).toString('utf-8').trim();
+  return { head, cleanTree: status.length === 0 };
+}
+
 /** Reads a file at a given ref (for example the base commit) from the run copy. */
 export function gitShowFile(repoPath: string, ref: string, file: string): string {
   try {
