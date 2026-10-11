@@ -6,15 +6,43 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertStepBudgetAllowed, assertStepRunAllowed, cumulativeTokens } from '../src/model/index.js';
 import { deriveStatus } from '../src/state/derive.js';
 import type { Fact } from '../src/state/facts.js';
 
+export type ChildStatus = 'completed' | 'transient' | 'crashed' | 'timed_out';
+
+export interface ChildResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error: Error | undefined;
+  stdout: string | null;
+  stderr: string | null;
+  timedOut: boolean;
+}
+
+const transientFailurePattern =
+  /429|rate limit|timed out|timeout|socket hang up|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|temporarily unavailable|bad gateway|service unavailable/i;
+
+export function classifyChild(child: ChildResult): ChildStatus {
+  if (child.timedOut) return 'timed_out';
+
+  const combined = `${child.stdout ?? ''}\n${child.stderr ?? ''}`;
+  if (/Run ID: (run-\d+)/.test(combined)) return 'completed';
+  if (transientFailurePattern.test(`${combined}\n${child.error?.message ?? ''}`)) {
+    return 'transient';
+  }
+  return 'crashed';
+}
+
 interface MeasurementRow {
   issue: string;
   mode: 'graph' | 'no-graph';
   runId: string;
+  status: 'completed' | 'timed_out';
+  exitCode: number | null;
   derivedStatus: string;
   attempts: number;
   testsProtectedFailed: boolean;
@@ -86,7 +114,11 @@ function renderMarkdown(): string {
   return sections.join('\n') + '\n';
 }
 
-function collectRow(runId: string, issue: string, mode: 'graph' | 'no-graph'): MeasurementRow {
+function collectRow(
+  runId: string,
+  issue: string,
+  mode: 'graph' | 'no-graph'
+): Omit<MeasurementRow, 'status' | 'exitCode'> {
   const runDir = path.join('runs', runId);
   const facts = fs
     .readFileSync(path.join(runDir, 'facts.jsonl'), 'utf-8')
@@ -131,19 +163,61 @@ function collectRow(runId: string, issue: string, mode: 'graph' | 'no-graph'): M
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  let dryRun = false;
+  let startAt = 0;
+  let onlyIssue: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--dry-run') {
+      dryRun = true;
+    } else if (arg === '--start-at' || arg === '--only-issue') {
+      const value = args[++index];
+      if (value === undefined || !/^\d+$/.test(value)) {
+        throw new Error(`${arg} requires a non-negative integer.`);
+      }
+      if (arg === '--start-at') {
+        startAt = Number(value);
+      } else {
+        onlyIssue = value;
+        if (!['1', '2', '3'].includes(onlyIssue)) {
+          throw new Error('--only-issue must be 1, 2, or 3.');
+        }
+      }
+    } else if (arg !== '--initialize-only') {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  const selectedPlan = plan
+    .filter((item) => onlyIssue === undefined || item.issue === onlyIssue)
+    .slice(startAt);
+  if (dryRun) {
+    console.log(`Measurement plan (${selectedPlan.length} runs):`);
+    selectedPlan.forEach((item, index) => {
+      console.log(`${index + 1}/${selectedPlan.length} issue=${item.issue} mode=${item.mode}`);
+    });
+    return;
+  }
+
   if (!fs.existsSync(baselinePath)) throw new Error(`Step 10 baseline missing: ${baselinePath}`);
   process.env.FOREMAN_STEP_BASELINE = baselinePath;
   process.env.FOREMAN_STEP_TOKEN_CAP ??= '260000';
-  if (process.argv.includes('--initialize-only')) {
+  if (args.includes('--initialize-only')) {
     writeResults();
     console.log('Initialized empty measurement results; no runs or model calls were made.');
     return;
   }
 
+  const timeoutMs = Number(process.env.FOREMAN_RUN_TIMEOUT_MS ?? 600000);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('FOREMAN_RUN_TIMEOUT_MS must be a positive safe integer.');
+  }
+
   const tsx = path.resolve('node_modules', 'tsx', 'dist', 'cli.mjs');
   const cli = path.resolve('src', 'cli', 'index.ts');
 
-  for (const item of plan) {
+  for (const [index, item] of selectedPlan.entries()) {
     try {
       assertStepRunAllowed();
       assertStepBudgetAllowed();
@@ -151,45 +225,59 @@ async function main(): Promise<void> {
       stoppedReason = error instanceof Error ? error.message : String(error);
       break;
     }
-    const args = [tsx, cli, 'run', '--issue', item.issue];
-    if (item.mode === 'no-graph') args.push('--no-graph');
-    const child = spawnSync(process.execPath, args, {
+    console.log(`Starting ${index + 1}/${selectedPlan.length} issue=${item.issue} mode=${item.mode}`);
+    const cliArgs = [tsx, cli, 'run', '--issue', item.issue];
+    if (item.mode === 'no-graph') cliArgs.push('--no-graph');
+    const startedAt = Date.now();
+    const child = spawnSync(process.execPath, cliArgs, {
       cwd: root,
       encoding: 'utf-8',
       env: process.env,
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
     });
     const combined = `${child.stdout ?? ''}\n${child.stderr ?? ''}`;
     const runId = combined.match(/Run ID: (run-\d+)/)?.[1];
-    if (!runId) {
-      stoppedReason = combined.match(/Ledger: [^\r\n]+/)?.[0] ?? `run process exited ${child.status}`;
-      const transient = /429|rate limit|timed out|timeout|socket hang up|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|temporarily unavailable|bad gateway|service unavailable/i.test(combined);
-      if (transient) {
-        consecutiveTransientFailures++;
-      } else {
-        consecutiveTransientFailures = 0;
+    const childStatus = classifyChild({
+      status: child.status,
+      signal: child.signal,
+      error: child.error,
+      stdout: child.stdout,
+      stderr: child.stderr,
+      timedOut:
+        child.error !== undefined && /ETIMEDOUT|timed out/i.test(child.error.message),
+    });
+    let row: MeasurementRow | undefined;
+    if (runId && (childStatus === 'completed' || childStatus === 'timed_out')) {
+      row = {
+        ...collectRow(runId, item.issue, item.mode),
+        status: childStatus,
+        exitCode: child.status,
+      };
+      rows.push(row);
+      writeResults();
+    }
+    const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(2);
+    console.log(
+      `Finished ${index + 1}/${selectedPlan.length} status=${childStatus} attempts=${row?.attempts ?? 0} tokens=${row?.tokens ?? 0} elapsed=${elapsedSeconds}s`
+    );
+
+    if (childStatus === 'transient') {
+      consecutiveTransientFailures++;
+      if (consecutiveTransientFailures >= 3) {
+        stoppedReason = 'three consecutive transient failures';
+        break;
       }
-      if (consecutiveTransientFailures >= 3) break;
-      if (child.status !== 0 && !transient) break;
       continue;
     }
-    const row = collectRow(runId, item.issue, item.mode);
-    rows.push(row);
-    writeResults();
-    console.log(`${row.runId}: issue=${row.issue} mode=${row.mode} status=${row.derivedStatus} attempts=${row.attempts} tokens=${row.tokens}`);
-    const transient = /429|rate limit|timed out|timeout|socket hang up|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|temporarily unavailable|bad gateway|service unavailable/i.test(combined);
-    consecutiveTransientFailures = transient
-      ? consecutiveTransientFailures + 1
-      : 0;
-    if (consecutiveTransientFailures >= 3) {
-      stoppedReason = 'three consecutive transient failures';
+    consecutiveTransientFailures = 0;
+    if (childStatus === 'crashed') {
+      stoppedReason =
+        combined.match(/Ledger: [^\r\n]+/)?.[0] ?? `run process crashed (exit=${child.status}, signal=${child.signal})`;
       break;
     }
-    if (child.status !== 0 && !transient) {
-      stoppedReason = `run ${runId} exited ${child.status}`;
-      break;
-    }
-    if (/^Stopped\r?$/m.test(combined) && !transient) {
-      stoppedReason = `run ${runId} stopped before completion`;
+    if (childStatus === 'timed_out') {
+      stoppedReason = `run process timed out after ${timeoutMs}ms`;
       break;
     }
   }
@@ -200,7 +288,9 @@ async function main(): Promise<void> {
   if (stoppedReason) console.log(`Measurement stopped: ${stoppedReason}`);
 }
 
-main().catch((error: unknown) => {
-  console.error(`Measurement failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error: unknown) => {
+    console.error(`Measurement failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}
