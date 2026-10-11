@@ -244,4 +244,13 @@ describe('runGate', () => {
     assert.deepEqual(result.failedRules, ['boom_rule']);
     assert.match(result.rules[0].detail, /rule threw: boom/);
   });
+
+  it('records graph-dependent rules as skipped without failing the gate', () => {
+    const result = runGate(makeContext(), policy, undefined, ['evidence_scope', 'blast_radius']);
+    assert.equal(result.passed, true);
+    assert.deepEqual(result.failedRules, []);
+    const skipped = result.rules.filter((rule) => rule.skipped);
+    assert.deepEqual(skipped.map((rule) => rule.ruleId), ['evidence_scope', 'blast_radius']);
+    assert.ok(skipped.every((rule) => rule.detail === 'skipped_no_graph'));
+  });
 });

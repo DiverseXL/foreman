@@ -63,12 +63,20 @@ export interface ModelCallCosts {
   keyMaxBudgetUsd?: number | null;
 }
 
+interface StepBaseline {
+  ledgerLineCount: number;
+  cumulativeTokens: number;
+  keySpendUsd: number;
+  runFolders: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Step-level caps
 // ---------------------------------------------------------------------------
 
 export const STEP_MAX_COMPLETION_TOKENS_PER_CALL = 6000;
 export const STEP_MAX_TOTAL_TOKENS = 200000;
+export const STEP_10_TOKEN_CAP = 260000;
 
 export const STEP_MAX_PATCH_ATTEMPTS = 1;
 
@@ -133,6 +141,94 @@ export function latestKeyBudget(runsDir = 'runs'): { spend: number | null; max: 
   return { spend: null, max: null };
 }
 
+function stepBaseline(): StepBaseline | undefined {
+  const location = process.env.FOREMAN_STEP_BASELINE?.trim();
+  if (!location) return undefined;
+  if (!fs.existsSync(location)) throw new Error(`Ledger: step baseline not found: ${location}`);
+  const value = JSON.parse(fs.readFileSync(location, 'utf-8')) as Partial<StepBaseline>;
+  if (
+    typeof value.cumulativeTokens !== 'number' ||
+    !Number.isFinite(value.cumulativeTokens) ||
+    typeof value.ledgerLineCount !== 'number' ||
+    !Number.isFinite(value.ledgerLineCount) ||
+    typeof value.keySpendUsd !== 'number' ||
+    !Number.isFinite(value.keySpendUsd) ||
+    !Array.isArray(value.runFolders) ||
+    value.runFolders.some((folder) => typeof folder !== 'string')
+  ) {
+    throw new Error('Ledger: step baseline must contain cumulativeTokens, keySpendUsd and runFolders.');
+  }
+  return value as StepBaseline;
+}
+
+export function stepTokenGrowth(runsDir = 'runs'): number {
+  const baseline = stepBaseline();
+  if (!baseline) return 0;
+  const total = cumulativeTokens(runsDir).total;
+  if (total < baseline.cumulativeTokens) throw new Error('Ledger: cumulative tokens are below the Step 10 baseline.');
+  return total - baseline.cumulativeTokens;
+}
+
+export function stepKeySpendGrowth(runsDir = 'runs'): number | null {
+  const baseline = stepBaseline();
+  if (!baseline) return null;
+  const entries = readLedger(getLedgerPath(runsDir));
+  const newEntries = entries.slice(baseline.ledgerLineCount);
+  if (newEntries.some((entry) => typeof entry.keySpendUsd !== 'number' || !Number.isFinite(entry.keySpendUsd))) {
+    throw new Error('Ledger: Step 10 key spend growth cannot be verified because a new call omitted key spend.');
+  }
+  const current = latestKeyBudget(runsDir).spend;
+  if (current === null) throw new Error('Ledger: key spend is unavailable after the Step 10 baseline.');
+  if (current < baseline.keySpendUsd) throw new Error('Ledger: reported key spend is below the Step 10 baseline.');
+  return current - baseline.keySpendUsd;
+}
+
+export function stepRunCount(runsDir = 'runs'): number {
+  const baseline = stepBaseline();
+  if (!baseline) return 0;
+  if (!fs.existsSync(runsDir)) return 0;
+  return fs
+    .readdirSync(runsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('run-') && !baseline.runFolders.includes(entry.name))
+    .length;
+}
+
+export function assertStepRunAllowed(runsDir = 'runs'): void {
+  if (!stepBaseline()) return;
+  const maxRuns = 15;
+  const started = stepRunCount(runsDir);
+  if (started >= maxRuns) {
+    throw new Error(`Ledger: Step 10 full-run cap reached. Runs ${started} >= cap ${maxRuns}.`);
+  }
+}
+
+export function assertStepBudgetAllowed(runsDir = 'runs'): void {
+  const baseline = stepBaseline();
+  if (!baseline) return;
+  const tokenCapRaw = process.env.FOREMAN_STEP_TOKEN_CAP?.trim();
+  const tokenCap = tokenCapRaw ? Number(tokenCapRaw) : STEP_10_TOKEN_CAP;
+  if (!Number.isFinite(tokenCap) || tokenCap <= 0) {
+    throw new Error('Ledger: FOREMAN_STEP_TOKEN_CAP must be a positive number.');
+  }
+
+  const growth = stepTokenGrowth(runsDir);
+  if (growth >= tokenCap) {
+    throw new Error(`Ledger: step token cap reached. Growth ${growth} >= cap ${tokenCap}.`);
+  }
+  const spendGrowth = stepKeySpendGrowth(runsDir);
+  if (spendGrowth !== null && spendGrowth >= 6) {
+    throw new Error(`Ledger: step key spend cap reached. Growth $${spendGrowth.toFixed(6)} >= cap $6.00.`);
+  }
+}
+
+function tokenCapForCurrentStep(runsDir: string): number {
+  if (!stepBaseline()) return STEP_MAX_TOTAL_TOKENS;
+  const raw = process.env.FOREMAN_STEP_TOKEN_CAP?.trim();
+  const cap = raw ? Number(raw) : STEP_10_TOKEN_CAP;
+  if (!Number.isFinite(cap) || cap <= 0) throw new Error('Ledger: FOREMAN_STEP_TOKEN_CAP must be a positive number.');
+  return cap;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -160,10 +256,12 @@ export function assertPriceConfigured(model: string, pricesPath?: string): void 
  * exceed the reported key max budget.
  */
 export function assertCallAllowed(model: string, runsDir = 'runs'): void {
-  const tokens = cumulativeTokens(runsDir);
-  if (tokens.total >= STEP_MAX_TOTAL_TOKENS) {
+  assertStepBudgetAllowed(runsDir);
+  const tokens = stepBaseline() ? stepTokenGrowth(runsDir) : cumulativeTokens(runsDir).total;
+  const tokenCap = tokenCapForCurrentStep(runsDir);
+  if (tokens >= tokenCap) {
     throw new Error(
-      `Ledger: step token cap reached. Cumulative tokens ${tokens.total} >= cap ${STEP_MAX_TOTAL_TOKENS}.`
+      `Ledger: step token cap reached. Tokens ${tokens} >= cap ${tokenCap}.`
     );
   }
 
@@ -262,13 +360,15 @@ export function recordModelCall(opts: {
 
   const ledgerPath = getLedgerPath(runsDir);
 
-  // Token cap is checked before appending.
-  const totals = cumulativeTokens(runsDir);
-  if (totals.total + promptTokens + completionTokens > STEP_MAX_TOTAL_TOKENS) {
+  // Token cap is checked before appending, relative to this step's baseline when configured.
+  const totals = stepBaseline() ? stepTokenGrowth(runsDir) : cumulativeTokens(runsDir).total;
+  const cap = tokenCapForCurrentStep(runsDir);
+  if (totals + promptTokens + completionTokens > cap) {
     throw new Error(
-      `Ledger: step token cap reached. Cumulative tokens ${totals.total} + this call would exceed ${STEP_MAX_TOTAL_TOKENS}.`
+      `Ledger: step token cap reached. Tokens ${totals} + this call would exceed ${cap}.`
     );
   }
+  assertStepBudgetAllowed(runsDir);
 
   // Budget cap is checked before appending (only meaningful when this call is costed).
   if (costUsd !== null) {
@@ -299,6 +399,7 @@ export function recordModelCall(opts: {
   const dir = path.dirname(ledgerPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf-8');
+  assertStepBudgetAllowed(runsDir);
 
   // No cost could be determined: the entry is recorded, then the call is refused.
   if (costSource === 'none') {

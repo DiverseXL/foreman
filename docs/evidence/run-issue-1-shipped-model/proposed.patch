@@ -1,0 +1,13 @@
+diff --git a/src/discount.ts b/src/discount.ts
+index 7ebd545..9b94d6a 100644
+--- a/src/discount.ts
++++ b/src/discount.ts
+@@ -35,7 +35,7 @@ export function calculateTieredBulkDiscount(quantity: number, unitPrice: number)
+   if (quantity >= 20) {
+     return roundCurrency(quantity * unitPrice * 0.20);
+   }
+-  if (quantity > 10) {
++  if (quantity >= 10) {
+     return roundCurrency(quantity * unitPrice * 0.10);
+   }
+   return 0;

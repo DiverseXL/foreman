@@ -1,0 +1,10 @@
+{
+  "runId": "run-1791666161585",
+  "attempts": 1,
+  "promptTokens": 6312,
+  "completionTokens": 745,
+  "totalTokens": 7057,
+  "gatewayCostUsd": 0.016481,
+  "wallTimeMs": 23824,
+  "outcome": "shipped"
+}

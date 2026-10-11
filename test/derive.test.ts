@@ -21,6 +21,22 @@ describe('deriveStatus pure function', () => {
     assert.equal(deriveStatus(facts), 'shipped');
   });
 
+  it('does not let a held-out result change derived status', () => {
+    const facts: Fact[] = [
+      { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'shipped' },
+    ];
+    const before = deriveStatus(facts);
+    facts.push({
+      seq: 2,
+      ts: '2026-10-10T10:00:01Z',
+      type: 'holdout_result',
+      issueId: '1',
+      passed: false,
+      failingTests: ['held-out-case'],
+    });
+    assert.equal(deriveStatus(facts), before);
+  });
+
   it('returns "needs_human" when needs_human fact is present', () => {
     const facts: Fact[] = [
       { seq: 1, ts: '2026-10-10T10:00:00Z', type: 'run_started', runId: 'run-1', issueId: '1' },

@@ -6,7 +6,7 @@ export interface ChangeSummary {
   changedSymbols: ChangedSymbol[];
   addedLines: string[];
   /** Which method supplied changedSymbols. */
-  method: 'entire_graph_diff' | 'line_span_fallback';
+  method: 'entire_graph_diff' | 'line_span_fallback' | 'no_graph';
   /** Extra context (e.g. why the fallback was used). */
   note: string;
 }
@@ -143,10 +143,25 @@ function symbolsFromLineSpans(
  * Fallback: map changed line numbers onto symbol spans from `entire graph symbols`.
  * The method actually used is reported in `method` and `note`.
  */
-export function collectChanges(repoPath: string, baseCommit: string, attemptCommit: string): ChangeSummary {
+export function collectChanges(
+  repoPath: string,
+  baseCommit: string,
+  attemptCommit: string,
+  graphEnabled = true
+): ChangeSummary {
   const unified = execSync(`git diff ${baseCommit} ${attemptCommit}`, { cwd: repoPath, encoding: 'utf-8' });
   const { addedLines, changedLinesByFile } = parseUnifiedDiff(unified);
   const changedFiles = parseChangedFiles(repoPath, baseCommit, attemptCommit);
+
+  if (!graphEnabled) {
+    return {
+      changedFiles,
+      changedSymbols: [],
+      addedLines,
+      method: 'no_graph',
+      note: 'graph-derived changed symbols were skipped in no-graph mode',
+    };
+  }
 
   const viaDiff = symbolsFromGraphDiff(repoPath, baseCommit, attemptCommit);
   if (viaDiff) {

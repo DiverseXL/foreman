@@ -1,0 +1,15 @@
+diff --git a/src/cart.ts b/src/cart.ts
+index 4a92322..afd1d6b 100644
+--- a/src/cart.ts
++++ b/src/cart.ts
+@@ -22,7 +22,9 @@ export function applyItemDiscounts(item: CartItem): number {
+  * Computes raw sum of items before order-level adjustments.
+  */
+ export function calculateRawItemsSubtotal(items: CartItem[]): number {
+-  return items.reduce((acc, item) => acc + item.price * item.quantity, 0);
++  const CENTS = 1e10;
++  const totalCents = items.reduce((acc, item) => acc + Math.round(item.price * CENTS) * item.quantity, 0);
++  return totalCents / CENTS;
+ }
+ 
+ /**

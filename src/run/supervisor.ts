@@ -98,6 +98,7 @@ export const NOOP_INSTRUMENT: SupervisorInstrument = {
 export interface SupervisorOptions {
   runId: string;
   issueId: string;
+  noGraph?: boolean;
   runDir: string;
   /** Directory that holds facts.jsonl and ledger.jsonl (default "runs"). */
   runsDir?: string;
@@ -276,6 +277,7 @@ export function writeRunReport(
     memory: readonly string[];
     outcome: ForemanStatus;
     attempts: number;
+    noGraph?: boolean;
   },
   facts: readonly Fact[],
   totals: RunTotals,
@@ -294,6 +296,10 @@ export function writeRunReport(
     droppedFact && droppedFact.type === 'criteria_dropped' && droppedFact.ids.length > 0
       ? droppedFact.ids.map((id, i) => `- ${id}: ${droppedFact.reasons[i] ?? ''}`).join('\n')
       : '(none; every generated criterion passed code evidence validation)';
+  const skippedRules = facts
+    .filter((f) => f.type === 'gate_result')
+    .flatMap((f) => (f.type === 'gate_result' ? f.skippedRules ?? [] : []));
+  const holdoutFact = [...facts].reverse().find((f) => f.type === 'holdout_result');
 
   const summaryRows: string[] = [
     '| Attempt | Injected | Patch source | Diff hash | Gate | Failed rules | targetPassed | Regressions | Escalated |',
@@ -392,6 +398,7 @@ export function writeRunReport(
     `Derived status: ${opts.outcome}`,
     `Attempts: ${opts.attempts}`,
     `Injected first attempt: ${opts.injected ? 'YES' : 'no'}`,
+    ...(opts.noGraph ? ['NO GRAPH MODE: enabled', `Skipped graph rules: ${Array.from(new Set(skippedRules)).join(', ') || 'none'}`] : []),
     `Trace ID: ${opts.traceId}`,
     '',
     '## Per-attempt results',
@@ -428,6 +435,12 @@ export function writeRunReport(
       ? 'The run branch in the run copy holds the shipped commit, and proposed.patch holds the same change. ' +
         'NO pull request was opened.'
       : 'Nothing was shipped.',
+    '',
+    '## Held-out verification',
+    '',
+    holdoutFact && holdoutFact.type === 'holdout_result'
+      ? `${holdoutFact.passed ? 'passed' : 'failed'}; failing tests: ${holdoutFact.failingTests.join(', ') || 'none'}`
+      : 'n/a (run did not ship)',
     '',
   ];
   writeArtifact(opts.runDir, 'report.md', lines.join('\n'));
@@ -650,7 +663,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
           { 'foreman.run_id': runId, 'foreman.issue_id': issueId }
         );
 
-        emit({ type: 'gate_result', attempt, passed: gate.passed, failedRules: gate.failedRules });
+        emit({
+          type: 'gate_result',
+          attempt,
+          passed: gate.passed,
+          failedRules: gate.failedRules,
+          skippedRules: gate.rules.filter((rule) => rule.skipped).map((rule) => rule.ruleId),
+        });
         writeArtifact(
           runDir,
           `gate-${attempt}.json`,
@@ -664,6 +683,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
               changedFiles: change.changedFiles,
               changedSymbols: change.changedSymbols,
               rules: gate.rules,
+              noGraph: options.noGraph ?? false,
             },
             null,
             2
@@ -674,7 +694,9 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
           emit({ type: 'attempt_failed', attempt, failureClass: 'blocked_policy' });
           memory.push(
             summarize(attempt, 'blocked_policy', {
-              failedRules: gate.rules.filter((r) => !r.passed).map((r) => ({ ruleId: r.ruleId, detail: r.detail })),
+              failedRules: gate.rules
+                .filter((r) => !r.passed && !r.skipped)
+                .map((r) => ({ ruleId: r.ruleId, detail: r.detail })),
             })
           );
           setOutcome('blocked_policy');
@@ -751,6 +773,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
             testsExercisingNote: 'the structural graph does not supply a test-to-symbol mapping',
             callSites: engine.callSites ? engine.callSites() : [],
           };
+          writeArtifact(runDir, `validator-input-${attempt}.json`, JSON.stringify(validatorInput, null, 2) + '\n');
 
           try {
             validatorResult = await retryTransient(attempt, () => engine.validate(validatorInput));
@@ -901,4 +924,3 @@ export async function runSupervisor(options: SupervisorOptions): Promise<Supervi
 
   return { status, attempts: attemptsUsed, shipped, memory };
 }
-

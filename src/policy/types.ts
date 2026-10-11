@@ -59,6 +59,7 @@ export interface RuleResult {
   ruleId: string;
   passed: boolean;
   detail: string;
+  skipped?: boolean;
 }
 
 export type Rule = ((ctx: GateContext, policy: Policy) => RuleResult) & { ruleId?: string };

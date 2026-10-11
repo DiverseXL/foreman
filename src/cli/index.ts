@@ -10,11 +10,11 @@ import {
   resetToBase,
   type WorkspaceResult,
 } from '../run/workspace.js';
-import { runTests, type TestRunResult } from '../run/tests.js';
+import { parseTestOutput, runTests, type TestRunResult } from '../run/tests.js';
 import { appendFact, readFacts, type PatchSource } from '../state/facts.js';
 import { deriveStatus } from '../state/derive.js';
 import { loadMandate, type Mandate } from '../mandate/load.js';
-import { buildContext, type ContextBundle } from '../context/graph.js';
+import { buildContext, buildNoGraphContext, type ContextBundle } from '../context/graph.js';
 import { buildRubric, scanTestNames, type RubricResult } from '../mandate/rubric.js';
 import {
   proposePatch,
@@ -43,7 +43,15 @@ import {
   shutdownTelemetry,
   type SupportedSpanKind,
 } from '../telemetry/index.js';
-import { cumulativeCost, cumulativeTokens, runTotals } from '../model/index.js';
+import {
+  assertStepBudgetAllowed,
+  assertStepRunAllowed,
+  cumulativeCost,
+  cumulativeTokens,
+  runTotals,
+} from '../model/index.js';
+import { spawnSync } from 'node:child_process';
+import { format } from 'node:util';
 
 interface CliArgs {
   command?: string;
@@ -51,10 +59,11 @@ interface CliArgs {
   setupOnly: boolean;
   through?: string;
   firstAttemptPatchFrom?: string;
+  noGraph: boolean;
 }
 
 function parseArgs(args: string[]): CliArgs {
-  const result: CliArgs = { setupOnly: false };
+  const result: CliArgs = { setupOnly: false, noGraph: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === 'run') result.command = 'run';
@@ -62,6 +71,7 @@ function parseArgs(args: string[]): CliArgs {
       result.issue = args[i + 1];
       i++;
     } else if (arg === '--setup-only') result.setupOnly = true;
+    else if (arg === '--no-graph') result.noGraph = true;
     else if (arg === '--through') {
       result.through = args[i + 1];
       i++;
@@ -90,11 +100,18 @@ function sanitizeGraphArgs(args: string[]): string {
     .join('-');
 }
 
-function persistContext(runId: string, workspace: WorkspaceResult, mandate: Mandate): ContextBundle {
+function persistContext(
+  runId: string,
+  workspace: WorkspaceResult,
+  mandate: Mandate,
+  noGraph = false
+): ContextBundle {
   const dir = ensureRunDir(runId);
   fs.writeFileSync(path.join(dir, 'mandate.json'), JSON.stringify(mandate, null, 2) + '\n', 'utf-8');
 
-  const { bundle, rawCommands } = buildContext(workspace.path, mandate);
+  const { bundle, rawCommands } = noGraph
+    ? buildNoGraphContext(workspace.path, mandate)
+    : buildContext(workspace.path, mandate);
   fs.writeFileSync(path.join(dir, 'context.json'), JSON.stringify(bundle, null, 2) + '\n', 'utf-8');
 
   const graphRawDir = path.join(dir, 'graph-raw');
@@ -105,6 +122,66 @@ function persistContext(runId: string, workspace: WorkspaceResult, mandate: Mand
   });
 
   return bundle;
+}
+
+function teeConsole(runDir: string): () => void {
+  const logPath = path.join(runDir, 'console.log');
+  const methods = ['log', 'info', 'warn', 'error', 'debug'] as const;
+  const originals = new Map<(typeof methods)[number], (...args: unknown[]) => void>();
+  for (const method of methods) {
+    const originalMethod = console[method] as (...args: unknown[]) => void;
+    const original = originalMethod.bind(console);
+    originals.set(method, originalMethod);
+    console[method] = ((...args: unknown[]) => {
+      const rendered = format(...args)
+        .replace(
+          /(^|\n)\s*(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-litellm-(?!response-cost\b|key-spend\b)[a-z0-9-]+)\s*:\s*[^\r\n]*/gim,
+          '$1$2: [REDACTED]'
+        )
+        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+        .replace(/\b(?:sk-|ghp_|gho_|xox[baprs]-)[A-Za-z0-9_-]{10,}/g, '[REDACTED]');
+      fs.appendFileSync(logPath, rendered + '\n', 'utf-8');
+      original(rendered);
+    }) as typeof console[typeof method];
+  }
+  return () => {
+    for (const [method, original] of originals) console[method] = original as typeof console[typeof method];
+  };
+}
+
+function runHoldout(
+  runId: string,
+  issueId: string,
+  sourceRepo: string
+): { passed: boolean; failingTests: string[]; output: string } {
+  const workDir = path.resolve('.foreman-work', `holdout-${runId}`);
+  try {
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.cpSync(path.join(sourceRepo, 'src'), path.join(workDir, 'src'), { recursive: true });
+    fs.cpSync(path.resolve('holdout'), path.join(workDir, 'holdout'), { recursive: true });
+    const testPath = `holdout/issue-${issueId}.test.ts`;
+    const tsxCli = path.resolve('node_modules', 'tsx', 'dist', 'cli.mjs');
+    const child = spawnSync(process.execPath, [tsxCli, '--test', testPath], {
+      cwd: workDir,
+      encoding: 'utf-8',
+      timeout: 30000,
+    });
+    const output = `${child.stdout ?? ''}${child.stderr ?? ''}${child.error ? `\n${child.error.message}` : ''}`;
+    const parsed = parseTestOutput(output, child.status ?? 1);
+    const passed = child.status === 0 && !child.error;
+    return {
+      passed,
+      failingTests: passed
+        ? []
+        : parsed.failingTests.length > 0
+          ? parsed.failingTests
+          : [`holdout command failed (exit=${child.status}): ${child.error?.message ?? 'unknown failure'}`],
+      output,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { passed: false, failingTests: [`holdout execution error: ${message}`], output: message };
+  }
 }
 
 function loadInjectedEdits(file: string): PatchEdit[] {
@@ -120,22 +197,31 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   if (parsed.command !== 'run' || !parsed.issue) {
     console.error(
-      'Usage: foreman run --issue <n> [--setup-only] [--through context] [--first-attempt-patch-from <file>]'
+      'Usage: foreman run --issue <n> [--setup-only] [--no-graph] [--through context] [--first-attempt-patch-from <file>]'
     );
     process.exit(1);
   }
 
   const issueId = parsed.issue;
+  const shouldRunContext = !parsed.setupOnly;
+  const runPipeline = !parsed.setupOnly && parsed.through !== 'context' && parsed.through !== 'setup-only';
+  if (runPipeline) {
+    assertStepRunAllowed();
+    assertStepBudgetAllowed();
+  }
   const runId = `run-${Date.now()}`;
   const runDir = path.resolve(runDirPath(runId));
   const startedAtMs = Date.now();
   const firstAttemptPatchFrom = parsed.firstAttemptPatchFrom;
-  const shouldRunContext = !parsed.setupOnly;
-  const runPipeline = !parsed.setupOnly && parsed.through !== 'context' && parsed.through !== 'setup-only';
+  ensureRunDir(runId);
+  const restoreConsole = teeConsole(runDir);
+  if (parsed.noGraph) console.log('NO GRAPH MODE');
 
   let stoppedReason: string | undefined;
 
-  const { traceId } = await withWorkflow(runId, issueId, async (_span, currentTraceId) => {
+  let traceId = '';
+  try {
+  ({ traceId } = await withWorkflow(runId, issueId, async (_span, currentTraceId) => {
     appendFact(runId, { type: 'run_started', runId, issueId });
 
     const workspace = await withStage('workspace_setup', 'TOOL', async (stageSpan) => {
@@ -196,7 +282,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         'graph_context',
         'RETRIEVER',
         async (stageSpan) => {
-          const ctx = persistContext(runId, workspace, mandate!);
+          const ctx = persistContext(runId, workspace, mandate!, parsed.noGraph);
           stageSpan.setAttribute('foreman.context.query_count', ctx.queriesRun.length);
           stageSpan.setAttribute('foreman.context.finding_count', ctx.findings.length);
           stageSpan.setAttribute('foreman.context.symbol_fact_count', ctx.symbolFacts.length);
@@ -337,8 +423,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           apply: (edits) => applyEdits(workspace.path, edits),
           commit: (message) => commitAttempt(workspace.path, message),
           diff: (base, head) => gitDiffRange(workspace.path, base, head),
-          collect: (base, head) => collectChanges(workspace.path, base, head),
-          gate: (ctx) => runGate(ctx, policy),
+          collect: (base, head) => collectChanges(workspace.path, base, head, !parsed.noGraph),
+          gate: (ctx) =>
+            runGate(ctx, policy, undefined, parsed.noGraph ? ['evidence_scope', 'blast_radius'] : []),
           tests: () => runTests(workspace.path),
           validate: (input) =>
             withStage(
@@ -347,7 +434,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
               () => validatePatch(input, runId, policy.validatorMinConfidence, undefined, policy.validatorModel),
               { 'foreman.run_id': runId, 'foreman.issue_id': issueId, 'foreman.validator.model': policy.validatorModel }
             ),
-          callerCount: (symbol) => callerCountFor(workspace.path, symbol),
+          callerCount: (symbol) => (parsed.noGraph ? null : callerCountFor(workspace.path, symbol)),
           readChangedFunctions: (change) =>
             change.changedSymbols.map((s) => {
               const full = path.resolve(workspace.path, s.file);
@@ -426,6 +513,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             engine,
             baselinePassing: baseline.passingTests,
             firstAttemptPatch,
+            noGraph: parsed.noGraph,
             instrument,
             totals: () => runTotals(runId),
             wallClockMs: () => Date.now() - startedAtMs,
@@ -434,6 +522,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           supervisorOutcome = { status: outcome.status, attempts: outcome.attempts, shipped: outcome.shipped };
 
           // ----- Reports (derived only from facts and the ledger) -----
+          if (outcome.shipped) {
+            const holdout = runHoldout(runId, issueId, workspace.path);
+            fs.writeFileSync(path.join(runDir, `holdout-issue-${issueId}.txt`), holdout.output, 'utf-8');
+            appendFact(runId, { type: 'holdout_result', issueId, passed: holdout.passed, failingTests: holdout.failingTests });
+            console.log(`Held-out tests: ${holdout.passed ? 'passed' : `failed (${holdout.failingTests.join(', ')})`}`);
+          }
+
           const facts = readFacts(runId);
           const status = deriveStatus(facts);
           const totals = runTotals(runId);
@@ -449,6 +544,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
               memory: outcome.memory,
               outcome: status,
               attempts: outcome.attempts,
+              noGraph: parsed.noGraph,
             },
             facts,
             totals,
@@ -526,7 +622,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.log(`\nFacts Count: ${facts.length}`);
 
     return { derivedStatus };
-  });
+  }));
+  } finally {
+    restoreConsole();
+  }
 
   await flushTelemetry();
   await shutdownTelemetry();
@@ -537,7 +636,7 @@ const isDirectRun =
 
 if (isDirectRun) {
   main().catch((err: unknown) => {
-    console.error('Foreman CLI Error:', err);
+    console.error('Foreman CLI Error:', err instanceof Error ? err.message : String(err));
     process.exit(1);
   });
 }

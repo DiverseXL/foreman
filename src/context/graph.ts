@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Mandate } from '../mandate/load.js';
 
 export interface ContextFinding {
@@ -40,6 +42,7 @@ export interface ContextBundle {
   queriesRun: string[];
   findings: ContextFinding[];
   symbolFacts: SymbolFact[];
+  hintedFiles?: { path: string; content: string }[];
   notes: string;
   indexSummary?: IndexSummary;
 }
@@ -116,6 +119,7 @@ export function buildContext(repoPath: string, mandate: Mandate): ContextResult 
         `Indexed run workspace: ${indexSummary.files} files, ${indexSummary.symbols} symbols, ${indexSummary.relations} relations (completeness: ${indexSummary.completeness}).`
       );
     }
+
   } else {
     notesList.push(`Index status: ${indexRes.error || 'non-json output'}`);
   }
@@ -261,5 +265,33 @@ export function buildContext(repoPath: string, mandate: Mandate): ContextResult 
       indexSummary,
     },
     rawCommands,
+  };
+}
+
+/** Loads only the complete hinted files; this path deliberately never invokes Entire graph. */
+export function buildNoGraphContext(repoPath: string, mandate: Mandate): ContextResult {
+  const root = path.resolve(repoPath);
+  const hintedFiles = mandate.hintedPaths.map((file) => {
+    if (path.isAbsolute(file) || file.split(/[\\/]/).includes('..')) {
+      throw new Error(`No-graph context rejected unsafe hinted path: ${file}`);
+    }
+    const fullPath = path.resolve(root, file);
+    if (!fullPath.startsWith(`${root}${path.sep}`) && fullPath !== root) {
+      throw new Error(`No-graph context rejected path outside run copy: ${file}`);
+    }
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+      throw new Error(`No-graph context hinted file not found: ${file}`);
+    }
+    return { path: file, content: fs.readFileSync(fullPath, 'utf-8') };
+  });
+  return {
+    bundle: {
+      queriesRun: [],
+      findings: [],
+      symbolFacts: [],
+      hintedFiles,
+      notes: `NO GRAPH MODE: full text loaded for ${hintedFiles.length} hinted file(s); no graph findings, callers, or symbol facts.`,
+    },
+    rawCommands: [],
   };
 }

@@ -46,7 +46,7 @@ export type FactPayload =
       verdicts: { id: string; criterion: string; source: string; verdict: string; confidence: number; reason: string }[];
     }
   | { type: 'patch_proposed'; attempt: number; diffHash: string; patchSource?: PatchSource }
-  | { type: 'gate_result'; attempt: number; passed: boolean; failedRules: string[] }
+  | { type: 'gate_result'; attempt: number; passed: boolean; failedRules: string[]; skippedRules?: string[] }
   | {
       type: 'tests_result';
       attempt: number;
@@ -94,6 +94,7 @@ export type FactPayload =
     }
   | { type: 'budget_checked'; exhausted: boolean }
   | { type: 'needs_human'; reason: string }
+  | { type: 'holdout_result'; issueId: string; passed: boolean; failingTests: string[] }
   | { type: 'shipped' };
 
 export type Fact = FactPayload & {

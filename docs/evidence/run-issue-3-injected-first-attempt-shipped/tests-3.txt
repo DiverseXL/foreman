@@ -1,0 +1,91 @@
+
+> sample-repo@1.0.0 test
+> tsx --test test/**/*.test.ts
+
+✔ returns zero totals for empty cart (1.8458ms)
+✔ calculates single item subtotal correctly (0.7351ms)
+✔ calculates cart totals with taxes and shipping included (1.6659ms)
+✔ applies order level coupon discounts to cart totals (0.4414ms)
+✔ handles exempt items in cart totals (0.3362ms)
+✖ repro-issue-2 (2.1507ms)
+✔ calculates fixed dollar discount clamped to subtotal (2.7779ms)
+✔ clamps fixed discount when discount exceeds subtotal (1.8479ms)
+✔ calculates percentage discount on standard prices (0.5693ms)
+✔ distributes coupon split ratio across line items (0.4295ms)
+✔ calculates bulk tiered discount for large quantities (tier 2: >= 20) (0.7524ms)
+✖ repro-issue-1 (2.9893ms)
+✔ converts dollars to integer cents (1.893ms)
+✔ converts cents to dollar float (0.359ms)
+✔ adds two money amounts cleanly (0.3644ms)
+✔ subtracts money amounts without negative result (0.377ms)
+✔ multiplies money amount by factor with exact cents rounding (0.4289ms)
+✔ handles zero and negative amounts safely (0.3039ms)
+✔ rounds currency values using standard financial half-up rule (2.8108ms)
+✔ preserves integers and existing two decimal precision (0.3588ms)
+✔ calculates percentage discount on odd price (0.3638ms)
+✔ calculates standard tax for small amount (0.3101ms)
+✔ calculates standard and express flat shipping (2.2662ms)
+✔ provides free shipping for orders of $100 or more (0.3609ms)
+✔ calculates extra shipping fees for heavy packages (0.3413ms)
+✔ formats price with rounding (0.2521ms)
+✔ repro-issue-3 (0.3027ms)
+✔ calculates standard sales tax on taxable amount (0.9451ms)
+✔ handles tax exempt items cleanly (0.3158ms)
+✔ calculates compound state and municipal taxes (0.4195ms)
+✔ returns zero for zero or negative tax inputs (0.8158ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 29
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 877.1552
+
+✖ failing tests:
+
+test at test\cart.test.ts:52:1
+✖ repro-issue-2 (2.1507ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 0.30000000000000004
+  - 0.3
+       ^
+  
+      at TestContext.<anonymous> (<REPO_ROOT>\runs\run-1791663174555\repo\test\cart.test.ts:61:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0.30000000000000004,
+    expected: 0.3,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\discount.test.ts:35:1
+✖ repro-issue-1 (2.9893ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 50
+  
+      at TestContext.<anonymous> (<REPO_ROOT>\runs\run-1791663174555\repo\test\discount.test.ts:40:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 50,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+

@@ -20,8 +20,17 @@ function ruleIdOf(rule: Rule): string {
  * error message; a rule that returns a malformed result is also treated as a
  * failure. The gate passes only when every rule passes.
  */
-export function runGate(ctx: GateContext, policy: Policy, rules: Rule[] = RULES): GateResult {
+export function runGate(
+  ctx: GateContext,
+  policy: Policy,
+  rules: Rule[] = RULES,
+  skippedRuleIds: readonly string[] = []
+): GateResult {
   const results: RuleResult[] = rules.map((rule) => {
+    const ruleId = ruleIdOf(rule);
+    if (skippedRuleIds.includes(ruleId)) {
+      return { ruleId, passed: false, skipped: true, detail: 'skipped_no_graph' };
+    }
     try {
       const result = rule(ctx, policy);
       if (!result || typeof result.passed !== 'boolean' || typeof result.ruleId !== 'string') {
@@ -30,10 +39,10 @@ export function runGate(ctx: GateContext, policy: Policy, rules: Rule[] = RULES)
       return { ruleId: result.ruleId, passed: result.passed, detail: String(result.detail ?? '') };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return { ruleId: ruleIdOf(rule), passed: false, detail: `rule threw: ${message}` };
+      return { ruleId, passed: false, detail: `rule threw: ${message}` };
     }
   });
 
-  const failedRules = results.filter((r) => !r.passed).map((r) => r.ruleId);
+  const failedRules = results.filter((r) => !r.passed && !r.skipped).map((r) => r.ruleId);
   return { passed: failedRules.length === 0, rules: results, failedRules };
 }

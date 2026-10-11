@@ -126,6 +126,14 @@ export function buildSourceBundle(
   repoPath: string,
   maxChars = 12000
 ): SourceSnippet[] {
+  if (context.hintedFiles) {
+    return context.hintedFiles.map(({ path: file, content }) => ({
+      file,
+      startLine: 1,
+      endLine: content.split(/\r?\n/).length,
+      content,
+    }));
+  }
   const byFile = new Map<string, { start: number; end: number }[]>();
 
   const add = (file: string | undefined, start: number | undefined, end: number | undefined): void => {

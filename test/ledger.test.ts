@@ -9,6 +9,7 @@ import {
   estimateCost,
   getLedgerPath,
   assertCallAllowed,
+  assertStepRunAllowed,
   keyBudgetExceeded,
   latestKeyBudget,
   RESERVE_USD,
@@ -30,6 +31,8 @@ function readEntries(): LedgerEntry[] {
 }
 
 const previousBudget = process.env.FOREMAN_BUDGET_USD;
+const previousStepBaseline = process.env.FOREMAN_STEP_BASELINE;
+const previousStepTokenCap = process.env.FOREMAN_STEP_TOKEN_CAP;
 
 describe('ledger', () => {
   before(() => {
@@ -43,11 +46,17 @@ describe('ledger', () => {
   // Each test starts from an empty ledger so counts and caps are deterministic.
   beforeEach(() => {
     if (fs.existsSync(ledgerPath)) fs.rmSync(ledgerPath, { force: true });
+    delete process.env.FOREMAN_STEP_BASELINE;
+    delete process.env.FOREMAN_STEP_TOKEN_CAP;
   });
 
   afterEach(() => {
     if (previousBudget === undefined) delete process.env.FOREMAN_BUDGET_USD;
     else process.env.FOREMAN_BUDGET_USD = previousBudget;
+    if (previousStepBaseline === undefined) delete process.env.FOREMAN_STEP_BASELINE;
+    else process.env.FOREMAN_STEP_BASELINE = previousStepBaseline;
+    if (previousStepTokenCap === undefined) delete process.env.FOREMAN_STEP_TOKEN_CAP;
+    else process.env.FOREMAN_STEP_TOKEN_CAP = previousStepTokenCap;
   });
 
   it('appends a costed call and reports cumulative totals', () => {
@@ -206,5 +215,46 @@ describe('ledger', () => {
     assert.equal(keyBudgetExceeded(16, 20), false); // 19 <= 20
     assert.equal(keyBudgetExceeded(null, 20), false);
     assert.equal(keyBudgetExceeded(18, null), false);
+  });
+
+  it('enforces Step 10 token growth and full-run caps relative to the baseline', () => {
+    delete process.env.FOREMAN_BUDGET_USD;
+    const baselinePath = path.join(scratch, 'step-baseline.json');
+    fs.writeFileSync(
+      baselinePath,
+      JSON.stringify({ ledgerLineCount: 0, cumulativeTokens: 100, keySpendUsd: 2, runFolders: [] }),
+      'utf-8'
+    );
+    process.env.FOREMAN_STEP_BASELINE = baselinePath;
+    process.env.FOREMAN_STEP_TOKEN_CAP = '1';
+
+    const row: LedgerEntry = {
+      ts: new Date(0).toISOString(),
+      runId: 'step-run',
+      model: 'claude-haiku',
+      promptTokens: 100,
+      completionTokens: 0,
+      estimatedCostUsd: 0,
+      gatewayCostUsd: 0,
+      costUsd: 0,
+      costSource: 'gateway',
+      keySpendUsd: 8,
+      keyMaxBudgetUsd: 20,
+    };
+    fs.writeFileSync(ledgerPath, JSON.stringify(row) + '\n', 'utf-8');
+    assert.throws(() => assertCallAllowed('claude-haiku', scratch), /key spend cap reached/);
+
+    row.keySpendUsd = 2;
+    fs.writeFileSync(ledgerPath, JSON.stringify(row) + '\n', 'utf-8');
+    assert.equal(assertCallAllowed('claude-haiku', scratch), undefined);
+
+    row.promptTokens = 101;
+    fs.writeFileSync(ledgerPath, JSON.stringify(row) + '\n', 'utf-8');
+    assert.throws(() => assertCallAllowed('claude-haiku', scratch), /token cap reached/);
+
+    for (let i = 0; i < 14; i++) fs.mkdirSync(path.join(scratch, `run-${i}`), { recursive: true });
+    assert.doesNotThrow(() => assertStepRunAllowed(scratch));
+    fs.mkdirSync(path.join(scratch, 'run-14'), { recursive: true });
+    assert.throws(() => assertStepRunAllowed(scratch), /full-run cap reached/);
   });
 });
