@@ -110,3 +110,4 @@ Counts: 31 run folders; 4 shipped; 3 model-only shipped of 31 total runs.
 
 - 2026-10-11 16:05:41 +01:00 - Step 11: added offline measured-economics and before/after generators, fact-and-ledger-only run receipt rendering, evidence index and tool provenance, and the submission checklist. No model calls or Foreman runs were made.
 - 2026-10-11 17:12:49 +01:00 - Step 12a: vetted scule, pathe, ufo, and defu from full-history clones; ran direct Vitest suites, mined fix/bug history, and experimentally verified three scule regressions against their parent commits. No model calls or Foreman runs were made.
+- 2026-10-11 17:54:34 +01:00 - Step 12b: experimentally verified pinned parent/fix regression pairs for pathe, ufo, defu, and scule; registered their symptoms, licenses, runtime versions, and setup procedure. No model calls or Foreman runs were made.

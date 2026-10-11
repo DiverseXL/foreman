@@ -9,6 +9,7 @@
     "economics": "tsx scripts/export-economics.ts",
     "improvements": "tsx scripts/build-improvements.ts",
     "render": "tsx scripts/render-run.ts",
+    "setup-external": "tsx scripts/setup-external.ts",
     "smoke:neatlogs": "tsx scripts/smoke-neatlogs.ts",
     "smoke:litellm": "tsx scripts/smoke-litellm.ts"
   },

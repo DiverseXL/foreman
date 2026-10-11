@@ -1,0 +1,174 @@
+[
+  {
+    "name": "pathe",
+    "repoUrl": "https://github.com/unjs/pathe",
+    "parentSha": "55a21be8a14b70ec67098d3f68f54a34f3796fd4",
+    "fixSha": "b52fcacc59717a1e4a8783d4bbfae7fa81b4db07",
+    "fixDate": "2026-07-08T16:19:03+02:00",
+    "testFiles": [
+      "test/index.spec.ts"
+    ],
+    "targetTests": [
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file') should be '//server/share/file'",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file') should be '//server/share/file': AssertionError: expected '/server/share/file' to equal '//server/share/file'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file') should be '//server/share/file' on Windows",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file') should be '//server/share/file' on Windows: AssertionError: expected '/server/share/file' to equal '//server/share/file'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\unc-server-name\\\\unc-path') should be '//unc-server-name/unc-path'",
+        "symptom": "resolve resolve('\\\\\\\\unc-server-name\\\\unc-path') should be '//unc-server-name/unc-path': AssertionError: expected '/unc-server-name/unc-path' to equal '//unc-server-name/unc-path'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\unc-server-name\\\\unc-path') should be '//unc-server-name/unc-path' on Windows",
+        "symptom": "resolve resolve('\\\\\\\\unc-server-name\\\\unc-path') should be '//unc-server-name/unc-path' on Windows: AssertionError: expected '/unc-server-name/unc-path' to equal '//unc-server-name/unc-path'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file','..\\\\path') should be '//server/share/path'",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file','..\\\\path') should be '//server/share/path': AssertionError: expected '/server/share/path' to equal '//server/share/path'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file','..\\\\path') should be '//server/share/path' on Windows",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file','..\\\\path') should be '//server/share/path' on Windows: AssertionError: expected '/server/share/path' to equal '//server/share/path'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file','sub') should be '//server/share/file/sub'",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file','sub') should be '//server/share/file/sub': AssertionError: expected '/server/share/file/sub' to equal '//server/share/file/sub'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('\\\\\\\\server\\\\share\\\\file','sub') should be '//server/share/file/sub' on Windows",
+        "symptom": "resolve resolve('\\\\\\\\server\\\\share\\\\file','sub') should be '//server/share/file/sub' on Windows: AssertionError: expected '/server/share/file/sub' to equal '//server/share/file/sub'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('//server/share/file','../path') should be '//server/share/path'",
+        "symptom": "resolve resolve('//server/share/file','../path') should be '//server/share/path': AssertionError: expected '/server/share/path' to equal '//server/share/path'"
+      },
+      {
+        "testFile": "test/index.spec.ts",
+        "name": "resolve resolve('//server/share/file','../path') should be '//server/share/path' on Windows",
+        "symptom": "resolve resolve('//server/share/file','../path') should be '//server/share/path' on Windows: AssertionError: expected '/server/share/path' to equal '//server/share/path'"
+      }
+    ],
+    "testCommand": "node node_modules/vitest/vitest.mjs run --root <worktree> --testTimeout 60000 --reporter=verbose --no-color",
+    "timeoutMs": 60000,
+    "sourcePaths": [
+      "src/_path.ts"
+    ],
+    "sourceLinesAdded": 12,
+    "sourceLinesRemoved": 0,
+    "licenseLine": "MIT License",
+    "nodeVersion": "v24.16.0",
+    "npmVersion": "11.13.0",
+    "selectionRule": "The newest filtered fix commit that verifies in each of unjs/pathe, unjs/ufo and unjs/defu, plus the newest verified filtered commit of unjs/scule as an older control."
+  },
+  {
+    "name": "ufo",
+    "repoUrl": "https://github.com/unjs/ufo",
+    "parentSha": "a7b94e69ff6159de8ddfd4940c90db4708c0d67e",
+    "fixSha": "5cd9e676711af3f4e4b5398ddf6ca8d52c1c7e1f",
+    "fixDate": "2026-04-29T12:48:54+02:00",
+    "testFiles": [
+      "test/base.test.ts"
+    ],
+    "targetTests": [
+      {
+        "testFile": "test/base.test.ts",
+        "name": "withoutBase \"/legacy//evil.com\"-\"/legacy\"",
+        "symptom": "withoutBase \"/legacy//evil.com\"-\"/legacy\": AssertionError: expected '//evil.com' to be '/evil.com' // Object.is equality"
+      },
+      {
+        "testFile": "test/base.test.ts",
+        "name": "withoutBase \"/legacy//evil.com\"-\"/legacy/\"",
+        "symptom": "withoutBase \"/legacy//evil.com\"-\"/legacy/\": AssertionError: expected '//evil.com' to be '/evil.com' // Object.is equality"
+      },
+      {
+        "testFile": "test/base.test.ts",
+        "name": "withoutBase \"/legacy///evil.com\"-\"/legacy\"",
+        "symptom": "withoutBase \"/legacy///evil.com\"-\"/legacy\": AssertionError: expected '///evil.com' to be '/evil.com' // Object.is equality"
+      },
+      {
+        "testFile": "test/base.test.ts",
+        "name": "withoutBase \"/legacy//\"-\"/legacy\"",
+        "symptom": "withoutBase \"/legacy//\"-\"/legacy\": AssertionError: expected '//' to be '/' // Object.is equality"
+      }
+    ],
+    "testCommand": "node node_modules/vitest/vitest.mjs run --typecheck --root <worktree> --testTimeout 60000 --reporter=verbose --no-color",
+    "timeoutMs": 60000,
+    "sourcePaths": [
+      "src/utils.ts"
+    ],
+    "sourceLinesAdded": 4,
+    "sourceLinesRemoved": 2,
+    "licenseLine": "MIT License",
+    "nodeVersion": "v24.16.0",
+    "npmVersion": "11.13.0",
+    "selectionRule": "The newest filtered fix commit that verifies in each of unjs/pathe, unjs/ufo and unjs/defu, plus the newest verified filtered commit of unjs/scule as an older control."
+  },
+  {
+    "name": "defu",
+    "repoUrl": "https://github.com/unjs/defu",
+    "parentSha": "3942bfbbcaa72084bd4284846c83bd61ed7c8b29",
+    "fixSha": "11ba02213d4b1c6b02dd686041f75edc479c98e9",
+    "fixDate": "2026-04-01T18:25:41+02:00",
+    "testFiles": [
+      "test/defu.test.ts"
+    ],
+    "targetTests": [
+      {
+        "testFile": "test/defu.test.ts",
+        "name": "defu should ignore inherited enumerable properties",
+        "symptom": "defu should ignore inherited enumerable properties: AssertionError: expected { nested: { pollutedEnum: 123 }, …(1) } to deeply equal { nested: {} }"
+      }
+    ],
+    "testCommand": "node node_modules/vitest/vitest.mjs run --root <worktree> --testTimeout 60000 --reporter=verbose --no-color",
+    "timeoutMs": 60000,
+    "sourcePaths": [
+      "src/defu.ts"
+    ],
+    "sourceLinesAdded": 2,
+    "sourceLinesRemoved": 2,
+    "licenseLine": "MIT License",
+    "nodeVersion": "v24.16.0",
+    "npmVersion": "11.13.0",
+    "selectionRule": "The newest filtered fix commit that verifies in each of unjs/pathe, unjs/ufo and unjs/defu, plus the newest verified filtered commit of unjs/scule as an older control."
+  },
+  {
+    "name": "scule",
+    "repoUrl": "https://github.com/unjs/scule",
+    "parentSha": "d2c281f10e12b8e33a2ed6ef3630eeb54de7de7c",
+    "fixSha": "57cfd1528a03720392604a2e582782fc481657dd",
+    "fixDate": "2024-01-10T13:16:42+01:00",
+    "testFiles": [
+      "test/scule.test.ts"
+    ],
+    "targetTests": [
+      {
+        "testFile": "test/scule.test.ts",
+        "name": "splitByCase new-name-value => [ 'new-name-value' ]",
+        "symptom": "splitByCase new-name-value => [ 'new-name-value' ]: AssertionError: expected [ 'new', '-name', '-value' ] to match object [ 'new-name-value' ]"
+      }
+    ],
+    "testCommand": "node node_modules/vitest/vitest.mjs run --typecheck --root <worktree> --testTimeout 60000 --reporter=verbose --no-color",
+    "timeoutMs": 60000,
+    "sourcePaths": [
+      "src/index.ts"
+    ],
+    "sourceLinesAdded": 1,
+    "sourceLinesRemoved": 1,
+    "licenseLine": "MIT License",
+    "nodeVersion": "v24.16.0",
+    "npmVersion": "11.13.0",
+    "selectionRule": "The newest filtered fix commit that verifies in each of unjs/pathe, unjs/ufo and unjs/defu, plus the newest verified filtered commit of unjs/scule as an older control."
+  }
+]
